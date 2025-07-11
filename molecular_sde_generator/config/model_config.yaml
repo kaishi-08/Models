@@ -1,0 +1,43 @@
+# config/model_config.yaml
+architecture:
+  name: "Joint2D3DMolecularModel"
+  
+molecular_model:
+  atom_types: 100
+  bond_types: 5
+  hidden_dim: 128
+  num_layers: 4
+  dropout: 0.1
+  
+e3_equivariant:
+  irreps_in: "128x0e"
+  irreps_hidden: "128x0e+64x1o+32x2e"
+  irreps_out: "128x0e"
+  irreps_sh: "1x0e+1x1o+1x2e"
+  max_radius: 10.0
+  num_basis: 50
+  radial_layers: 2
+  radial_neurons: 128
+  
+pocket_encoder:
+  input_dim: 64
+  hidden_dim: 128
+  output_dim: 256
+  num_layers: 4
+  attention_heads: 8
+  dropout: 0.1
+  
+cross_attention:
+  embed_dim: 128
+  num_heads: 8
+  dropout: 0.1
+  
+sde_model:
+  score_network:
+    time_embed_dim: 128
+    condition_embed_dim: 256
+  noise_schedule:
+    type: "variance_exploding"
+    sigma_min: 0.01
+    sigma_max: 50.0
+    beta_schedule: "cosine"

@@ -1,0 +1,66 @@
+# config/training_config.yaml
+data:
+  train_path: "data/processed/train.pkl"
+  val_path: "data/processed/val.pkl"
+  test_path: "data/processed/test.pkl"
+  batch_size: 32
+  num_workers: 4
+  pin_memory: true
+  shuffle: true
+
+model:
+  atom_types: 100
+  bond_types: 5
+  hidden_dim: 128
+  pocket_dim: 256
+  num_layers: 4
+  max_radius: 10.0
+
+sde:
+  sigma_min: 0.01
+  sigma_max: 50.0
+  num_steps: 1000
+  beta_schedule: "cosine"
+  prediction_type: "noise"  # or "score"
+
+training:
+  num_epochs: 100
+  lr: 0.001
+  weight_decay: 0.0001
+  grad_clip_norm: 1.0
+  accumulate_grad_batches: 1
+  
+optimizer:
+  type: "adamw"
+  lr: 0.001
+  betas: [0.9, 0.999]
+  weight_decay: 0.0001
+  
+scheduler:
+  type: "cosine_annealing"
+  T_max: 100
+  eta_min: 0.00001
+  
+loss_weights:
+  position_loss: 1.0
+  atom_type_loss: 0.1
+  bond_type_loss: 0.1
+  
+logging:
+  project_name: "molecular-sde-generation"
+  log_every_n_steps: 100
+  val_check_interval: 1000
+  save_top_k: 3
+  save_path: "models/"
+  
+early_stopping:
+  monitor: "val_loss"
+  patience: 20
+  min_delta: 0.001
+  
+generation:
+  num_molecules: 100
+  max_atoms: 50
+  guidance_scale: 1.5
+  num_steps: 1000
+  sampling_method: "ddpm"  # or "ddim"

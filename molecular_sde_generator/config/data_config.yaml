@@ -1,0 +1,46 @@
+# config/data_config.yaml
+dataset:
+  name: "CrossDocked2020"
+  raw_data_path: "data/raw/"
+  processed_data_path: "data/processed/"
+  train_split: 0.8
+  val_split: 0.1
+  test_split: 0.1
+  
+preprocessing:
+  max_atoms: 50
+  min_atoms: 5
+  max_pocket_atoms: 500
+  pocket_radius: 10.0
+  remove_hydrogens: false
+  add_hydrogens: true
+  
+molecular_features:
+  atom_features:
+    - "atomic_number"
+    - "degree"
+    - "formal_charge"
+    - "hybridization"
+    - "is_aromatic"
+    - "total_num_hs"
+  bond_features:
+    - "bond_type"
+    - "is_conjugated"
+    - "is_in_ring"
+    
+protein_features:
+  residue_features:
+    - "residue_type"
+    - "phi_angle"
+    - "psi_angle"
+    - "surface_accessibility"
+  atom_features:
+    - "atomic_number"
+    - "is_backbone"
+    - "charge"
+
+augmentation:
+  rotation: true
+  translation: true
+  conformer_noise: 0.1
+  pocket_noise: 0.05
