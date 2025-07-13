@@ -4,6 +4,8 @@ import torch.nn as nn
 import numpy as np
 from abc import ABC, abstractmethod
 from typing import Union, Tuple
+from .e3_egnn import E3EquivariantGNN
+
 
 class SDE(ABC):
     """Abstract base class for stochastic differential equations"""

@@ -5,6 +5,8 @@ from typing import Optional, Dict, Any
 from rdkit import Chem
 from rdkit.Chem import AllChem
 import numpy as np
+from ..models.joint_2d_3d_model import Joint2D3DMolecularModel
+from ..models.sde_diffusion import VESDE
 
 class ConditionalMolecularGenerator:
     """Conditional molecular generation using SDE diffusion"""

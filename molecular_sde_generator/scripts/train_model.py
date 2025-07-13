@@ -1,4 +1,3 @@
-# scripts/train_model.py
 import torch
 import torch.optim as optim
 from torch_geometric.loader import DataLoader
@@ -9,7 +8,8 @@ from pathlib import Path
 from src.models.joint_2d_3d_model import Joint2D3DMolecularModel
 from src.models.sde_diffusion import VESDE
 from src.training.sde_trainer import SDEMolecularTrainer
-from src.data.molecular_dataset import MolecularDataset
+from src.data.molecular_dataset import CrossDockMolecularDataset
+from src.data.data_loaders import CrossDockDataLoader
 
 def main():
     # Load configuration
@@ -17,38 +17,17 @@ def main():
         config = yaml.safe_load(f)
     
     # Initialize wandb
-    wandb.init(project="molecular-sde-generation", config=config)
+    wandb.init(project=config['logging']['project_name'], config=config)
     
     # Set device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
     
-    # Create datasets
-    train_dataset = MolecularDataset(
-        data_path=config['data']['train_path'],
-        transform=None,
-        include_pocket=True
-    )
+    # Create data loaders using the factory
+    train_loader = CrossDockDataLoader.create_train_loader(config)
+    val_loader = CrossDockDataLoader.create_val_loader(config)
     
-    val_dataset = MolecularDataset(
-        data_path=config['data']['val_path'],
-        transform=None,
-        include_pocket=True
-    )
-    
-    # Create data loaders
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=config['training']['batch_size'],
-        shuffle=True,
-        num_workers=config['training']['num_workers']
-    )
-    
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=config['training']['batch_size'],
-        shuffle=False,
-        num_workers=config['training']['num_workers']
-    )
+    print(f"Train batches: {len(train_loader)}, Val batches: {len(val_loader)}")
     
     # Initialize model
     model = Joint2D3DMolecularModel(
@@ -60,6 +39,8 @@ def main():
         max_radius=config['model']['max_radius']
     ).to(device)
     
+    print(f"Model parameters: {model.get_num_parameters():,}")
+    
     # Initialize SDE
     sde = VESDE(
         sigma_min=config['sde']['sigma_min'],
@@ -68,18 +49,33 @@ def main():
     )
     
     # Initialize optimizer
-    optimizer = optim.Adam(
-        model.parameters(),
-        lr=config['training']['lr'],
-        weight_decay=config['training']['weight_decay']
-    )
+    if config['optimizer']['type'] == 'adamw':
+        optimizer = optim.AdamW(
+            model.parameters(),
+            lr=config['optimizer']['lr'],
+            betas=config['optimizer']['betas'],
+            weight_decay=config['optimizer']['weight_decay']
+        )
+    else:
+        optimizer = optim.Adam(
+            model.parameters(),
+            lr=config['training']['lr'],
+            weight_decay=config['training']['weight_decay']
+        )
     
     # Initialize scheduler
-    scheduler = optim.lr_scheduler.StepLR(
-        optimizer,
-        step_size=config['training']['scheduler_step'],
-        gamma=config['training']['scheduler_gamma']
-    )
+    if config['scheduler']['type'] == 'cosine_annealing':
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=config['scheduler']['T_max'],
+            eta_min=config['scheduler']['eta_min']
+        )
+    else:
+        scheduler = optim.lr_scheduler.StepLR(
+            optimizer,
+            step_size=30,
+            gamma=0.5
+        )
     
     # Initialize trainer
     trainer = SDEMolecularTrainer(
@@ -92,11 +88,12 @@ def main():
     )
     
     # Train model
+    print("Starting training...")
     trainer.train(
         train_loader=train_loader,
         val_loader=val_loader,
         num_epochs=config['training']['num_epochs'],
-        save_path=config['training']['save_path']
+        save_path=config['logging']['save_path'] + '/best_model.pth'
     )
     
     print("Training completed!")

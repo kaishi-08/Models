@@ -1,8 +1,9 @@
-# src/models/joint_2d_3d_model.py
 import torch
 import torch.nn as nn
 from torch_geometric.nn import global_mean_pool
 from torch_geometric.utils import to_dense_batch
+from .e3_egnn import E3EquivariantGNN
+from .pocket_encoder import ProteinPocketEncoder, CrossAttentionPocketConditioner
 
 class Joint2D3DMolecularModel(nn.Module):
     """Joint 2D/3D molecular generation model with pocket conditioning"""

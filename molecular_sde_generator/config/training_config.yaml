@@ -1,16 +1,17 @@
-# config/training_config.yaml
 data:
   train_path: "data/processed/train.pkl"
   val_path: "data/processed/val.pkl"
   test_path: "data/processed/test.pkl"
-  batch_size: 32
+  batch_size: 16  # Reduced for memory efficiency
   num_workers: 4
   pin_memory: true
   shuffle: true
+  include_pocket: true
+  augment: true
 
 model:
-  atom_types: 100
-  bond_types: 5
+  atom_types: 11  # Updated for CrossDock atom types
+  bond_types: 4   # Single, Double, Triple, Aromatic
   hidden_dim: 128
   pocket_dim: 256
   num_layers: 4
@@ -21,24 +22,24 @@ sde:
   sigma_max: 50.0
   num_steps: 1000
   beta_schedule: "cosine"
-  prediction_type: "noise"  # or "score"
+  prediction_type: "score"
 
 training:
-  num_epochs: 100
-  lr: 0.001
+  num_epochs: 200
+  lr: 0.0005  # Slightly reduced
   weight_decay: 0.0001
   grad_clip_norm: 1.0
   accumulate_grad_batches: 1
   
 optimizer:
   type: "adamw"
-  lr: 0.001
+  lr: 0.0005
   betas: [0.9, 0.999]
   weight_decay: 0.0001
   
 scheduler:
   type: "cosine_annealing"
-  T_max: 100
+  T_max: 200
   eta_min: 0.00001
   
 loss_weights:
@@ -47,15 +48,15 @@ loss_weights:
   bond_type_loss: 0.1
   
 logging:
-  project_name: "molecular-sde-generation"
-  log_every_n_steps: 100
-  val_check_interval: 1000
+  project_name: "crossdock-molecular-sde-generation"
+  log_every_n_steps: 50
+  val_check_interval: 500
   save_top_k: 3
   save_path: "models/"
   
 early_stopping:
   monitor: "val_loss"
-  patience: 20
+  patience: 30
   min_delta: 0.001
   
 generation:
@@ -63,4 +64,4 @@ generation:
   max_atoms: 50
   guidance_scale: 1.5
   num_steps: 1000
-  sampling_method: "ddpm"  # or "ddim"
+  sampling_method: "ddpm"

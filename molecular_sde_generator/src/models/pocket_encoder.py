@@ -4,6 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import global_mean_pool, global_max_pool
 from torch_geometric.utils import to_dense_batch
+from .e3_egnn import E3EquivariantGNN
 
 class ProteinPocketEncoder(nn.Module):
     """Protein pocket encoder using E(3) equivariant networks"""

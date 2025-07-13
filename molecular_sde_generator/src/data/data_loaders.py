@@ -2,20 +2,21 @@
 import torch
 from torch.utils.data import DataLoader
 from torch_geometric.loader import DataLoader as GeometricDataLoader
-from .molecular_dataset import MolecularDataset, collate_molecular_data
+from .molecular_dataset import CrossDockMolecularDataset, collate_crossdock_data
 from .pocket_dataset import ProteinPocketDataset
 from typing import Optional, Dict, Any
 
-class MolecularDataLoader:
-    """Factory class for creating molecular data loaders"""
+class CrossDockDataLoader:
+    """Factory class for creating CrossDock data loaders"""
     
     @staticmethod
     def create_train_loader(config: Dict[str, Any]) -> DataLoader:
-        """Create training data loader"""
-        dataset = MolecularDataset(
+        """Create training data loader for CrossDock"""
+        dataset = CrossDockMolecularDataset(
             data_path=config['data']['train_path'],
             include_pocket=config.get('include_pocket', True),
-            max_atoms=config.get('max_atoms', 50)
+            max_atoms=config.get('max_atoms', 50),
+            augment=config.get('augment', True)
         )
         
         return GeometricDataLoader(
@@ -24,16 +25,18 @@ class MolecularDataLoader:
             shuffle=config['data'].get('shuffle', True),
             num_workers=config['data'].get('num_workers', 4),
             pin_memory=config['data'].get('pin_memory', True),
-            collate_fn=collate_molecular_data
+            collate_fn=collate_crossdock_data,
+            drop_last=True  # Important for consistent batch sizes
         )
     
     @staticmethod
     def create_val_loader(config: Dict[str, Any]) -> DataLoader:
-        """Create validation data loader"""
-        dataset = MolecularDataset(
+        """Create validation data loader for CrossDock"""
+        dataset = CrossDockMolecularDataset(
             data_path=config['data']['val_path'],
             include_pocket=config.get('include_pocket', True),
-            max_atoms=config.get('max_atoms', 50)
+            max_atoms=config.get('max_atoms', 50),
+            augment=False  # No augmentation for validation
         )
         
         return GeometricDataLoader(
@@ -42,16 +45,18 @@ class MolecularDataLoader:
             shuffle=False,
             num_workers=config['data'].get('num_workers', 4),
             pin_memory=config['data'].get('pin_memory', True),
-            collate_fn=collate_molecular_data
+            collate_fn=collate_crossdock_data,
+            drop_last=False
         )
     
     @staticmethod
     def create_test_loader(config: Dict[str, Any]) -> DataLoader:
-        """Create test data loader"""
-        dataset = MolecularDataset(
+        """Create test data loader for CrossDock"""
+        dataset = CrossDockMolecularDataset(
             data_path=config['data']['test_path'],
             include_pocket=config.get('include_pocket', True),
-            max_atoms=config.get('max_atoms', 50)
+            max_atoms=config.get('max_atoms', 50),
+            augment=False  # No augmentation for testing
         )
         
         return GeometricDataLoader(
@@ -60,8 +65,14 @@ class MolecularDataLoader:
             shuffle=False,
             num_workers=config['data'].get('num_workers', 4),
             pin_memory=config['data'].get('pin_memory', True),
-            collate_fn=collate_molecular_data
+            collate_fn=collate_crossdock_data,
+            drop_last=False
         )
+
+# Legacy class for backward compatibility
+class MolecularDataLoader(CrossDockDataLoader):
+    """Factory class for creating molecular data loaders (backward compatibility)"""
+    pass
 
 class PocketDataLoader:
     """Factory class for creating protein pocket data loaders"""
