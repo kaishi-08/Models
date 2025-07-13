@@ -1,7 +1,7 @@
 # src/utils/molecular_utils.py
 import torch
 import numpy as np
-from rdkit import Chem
+from rdkit import Chem, DataStructs
 from rdkit.Chem import AllChem, Descriptors, rdMolDescriptors
 from typing import List, Dict, Any, Optional, Tuple
 import networkx as nx
