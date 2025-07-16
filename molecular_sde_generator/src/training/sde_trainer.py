@@ -13,7 +13,7 @@ from pathlib import Path
 from ..models.joint_2d_3d_model import Joint2D3DMolecularModel
 from ..models.sde_diffusion import VESDE
 from .losses import MolecularLoss, ScoreMatchingLoss
-from .callbacks import TrainingCallback
+from .callbacks_fixed import TrainingCallback
 
 class SDEMolecularTrainer:
     """Enhanced trainer for SDE-based molecular generation"""

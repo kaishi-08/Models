@@ -2,6 +2,7 @@
 import torch
 import numpy as np
 from torch_geometric.data import Dataset, Data
+import Bio
 from Bio.PDB import PDBParser, DSSP
 from typing import List, Dict, Any, Optional
 import os
