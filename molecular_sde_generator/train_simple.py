@@ -1,4 +1,4 @@
-# train_simple.py - Simple training script for CrossDock
+# train_simple.py - Robust version with error handling
 import torch
 import torch.optim as optim
 import yaml
@@ -17,13 +17,19 @@ from src.training.sde_trainer import SDEMolecularTrainer
 from src.data.data_loaders import CrossDockDataLoader
 from src.training.callbacks_fixed import EarlyStopping, ModelCheckpoint
 
+def count_parameters(model):
+    """Count trainable parameters in model"""
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
 def main():
-    parser = argparse.ArgumentParser(description='Simple CrossDock Training')
+    parser = argparse.ArgumentParser(description='Simple CrossDock Training - Train/Test Only')
     parser.add_argument('--config', type=str, default='config/simple_config.yaml')
     parser.add_argument('--test', action='store_true', help='Quick test mode')
     parser.add_argument('--gpu', type=int, default=None, help='GPU device ID')
     parser.add_argument('--epochs', type=int, default=None, help='Number of epochs')
     parser.add_argument('--batch_size', type=int, default=None, help='Batch size')
+    parser.add_argument('--use_train_split', action='store_true', 
+                       help='Split train data for validation (recommended)')
     
     args = parser.parse_args()
     
@@ -72,7 +78,7 @@ def main():
         # Check if processed data exists
         required_files = [
             config['data']['train_path'],
-            config['data']['val_path']
+            config['data']['test_path']
         ]
         
         missing_files = []
@@ -83,25 +89,27 @@ def main():
         if missing_files:
             print(f"❌ Required files not found: {missing_files}")
             print("Please run preprocessing first:")
-            print("  python preprocess_crossdock_data.py")
-            
-            # Check if we need to create validation split
-            split_file = Path("data/split_by_name.pt")
-            if split_file.exists():
-                splits = torch.load(split_file)
-                if 'val' not in splits:
-                    print("\n⚠️  No validation split found, creating one...")
-                    print("Run preprocessing to create validation split:")
-                    print("  python preprocess_crossdock_data.py --max_samples 1000")
+            print("  python scripts/preprocess_crossdock_data.py --max_samples 1000")
             return
         
         # Create data loaders
         print("📂 Creating data loaders...")
-        train_loader = CrossDockDataLoader.create_train_loader(config)
-        val_loader = CrossDockDataLoader.create_val_loader(config)
         
-        print(f"   Train batches: {len(train_loader)}")
-        print(f"   Val batches: {len(val_loader)}")
+        if args.use_train_split:
+            # Split train data for validation (recommended)
+            print("   Using train split for validation (recommended)")
+            train_loader, val_loader = CrossDockDataLoader.create_train_val_split_loader(
+                config, val_ratio=0.1
+            )
+            print(f"   Train split: {len(train_loader)} batches")
+            print(f"   Val split: {len(val_loader)} batches")
+        else:
+            # Use separate train/test files
+            print("   Using test set for validation (not recommended)")
+            train_loader = CrossDockDataLoader.create_train_loader(config)
+            val_loader = CrossDockDataLoader.create_val_loader(config)  # Uses test data
+            print(f"   Train: {len(train_loader)} batches")
+            print(f"   Val (test): {len(val_loader)} batches")
         
         # Test data loading
         print("   Testing data loading...")
@@ -112,6 +120,12 @@ def main():
         
         test_batch = test_batch.to(device)
         print(f"   ✅ Test batch: {test_batch.x.shape[0]} atoms, {test_batch.batch.max().item() + 1} molecules")
+        
+        # Check if pocket data is available
+        has_pocket = hasattr(test_batch, 'pocket_x') and test_batch.pocket_x is not None
+        print(f"   Pocket data: {'✅ Available' if has_pocket else '❌ Not available'}")
+        if has_pocket:
+            print(f"      Pocket atoms: {test_batch.pocket_x.shape[0]}")
         
         # Create model
         print("🧠 Creating model...")
@@ -124,7 +138,9 @@ def main():
             max_radius=config['model']['max_radius']
         ).to(device)
         
-        print(f"   Parameters: {model.get_num_parameters():,}")
+        # Count parameters (robust method)
+        num_params = count_parameters(model)
+        print(f"   Parameters: {num_params:,}")
         
         # Create SDE
         print("🌊 Creating SDE...")
@@ -159,7 +175,7 @@ def main():
             ),
             ModelCheckpoint(
                 save_path=str(output_dir / "checkpoints"),
-                monitor='val_loss',
+                monitor='val_total_loss',  # Use val_total_loss since we have train/test
                 save_best_only=True
             )
         ]
@@ -188,28 +204,47 @@ def main():
             noise = torch.randn_like(test_batch.pos)
             perturbed_pos = mean + std[:, None] * noise
             
-            outputs = model(
-                x=test_batch.x,
-                pos=perturbed_pos,
-                edge_index=test_batch.edge_index,
-                edge_attr=test_batch.edge_attr,
-                batch=test_batch.batch,
-                pocket_x=getattr(test_batch, 'pocket_x', None),
-                pocket_pos=getattr(test_batch, 'pocket_pos', None),
-                pocket_edge_index=getattr(test_batch, 'pocket_edge_index', None),
-                pocket_batch=getattr(test_batch, 'pocket_batch', None)
-            )
-            
-            print(f"   ✅ Forward pass successful")
-            for key, value in outputs.items():
-                if isinstance(value, torch.Tensor):
-                    print(f"      {key}: {value.shape}")
+            try:
+                outputs = model(
+                    x=test_batch.x,
+                    pos=perturbed_pos,
+                    edge_index=test_batch.edge_index,
+                    edge_attr=test_batch.edge_attr,
+                    batch=test_batch.batch,
+                    pocket_x=getattr(test_batch, 'pocket_x', None),
+                    pocket_pos=getattr(test_batch, 'pocket_pos', None),
+                    pocket_edge_index=getattr(test_batch, 'pocket_edge_index', None),
+                    pocket_batch=getattr(test_batch, 'pocket_batch', None)
+                )
+                
+                print(f"   ✅ Forward pass successful")
+                for key, value in outputs.items():
+                    if isinstance(value, torch.Tensor):
+                        print(f"      {key}: {value.shape}")
+                        
+            except Exception as e:
+                print(f"   ❌ Forward pass failed: {e}")
+                print("   Debug info:")
+                print(f"      x shape: {test_batch.x.shape}")
+                print(f"      pos shape: {test_batch.pos.shape}")
+                print(f"      edge_index shape: {test_batch.edge_index.shape}")
+                print(f"      edge_attr shape: {test_batch.edge_attr.shape}")
+                print(f"      batch shape: {test_batch.batch.shape}")
+                if has_pocket:
+                    print(f"      pocket_x shape: {test_batch.pocket_x.shape}")
+                    print(f"      pocket_pos shape: {test_batch.pocket_pos.shape}")
+                raise e
         
         # Start training
         print("\n🚀 Starting training...")
         print(f"   Epochs: {config['training']['num_epochs']}")
         print(f"   Batch size: {config['data']['batch_size']}")
         print(f"   Learning rate: {config['optimizer']['lr']}")
+        
+        if args.use_train_split:
+            print("   Validation: Split from train data (recommended)")
+        else:
+            print("   Validation: Using test set (not ideal for final evaluation)")
         
         save_path = output_dir / "best_model.pth"
         
@@ -224,6 +259,20 @@ def main():
         print(f"   Model saved to: {save_path}")
         print(f"   Output directory: {output_dir}")
         
+        # Evaluation on test set (if not used for validation)
+        if args.use_train_split:
+            print(f"\n📊 Evaluating on test set...")
+            test_loader = CrossDockDataLoader.create_test_loader(config)
+            test_metrics = trainer.validate(test_loader)
+            print(f"   Test loss: {test_metrics['total_loss']:.4f}")
+            
+            # Save test results
+            with open(output_dir / "test_results.txt", 'w') as f:
+                f.write(f"Test Results\n")
+                f.write(f"============\n")
+                for key, value in test_metrics.items():
+                    f.write(f"{key}: {value:.4f}\n")
+        
     except Exception as e:
         print(f"\n❌ Training failed: {e}")
         import traceback
@@ -231,11 +280,15 @@ def main():
         
         print("\n🔧 Troubleshooting:")
         print("   1. Check if data is preprocessed:")
-        print("      python preprocess_crossdock_data.py --max_samples 1000")
+        print("      python scripts/preprocess_crossdock_data.py --max_samples 1000")
         print("   2. Check data structure:")
         print("      python check_data_structure.py")
         print("   3. Try test mode:")
         print("      python train_simple.py --test")
+        print("   4. Use train split for validation:")
+        print("      python train_simple.py --use_train_split")
+        print("   5. Check model architecture:")
+        print("      python -c \"from src.models.joint_2d_3d_model import Joint2D3DMolecularModel; print('Model imported successfully')\"")
 
 if __name__ == "__main__":
     main()

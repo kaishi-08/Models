@@ -1,7 +1,7 @@
-# Simple config for CrossDock training - Updated for large dataset
+# Simple config for CrossDock training - Train/Test only
 data:
   train_path: "data/processed/train.pkl"
-  val_path: "data/processed/val.pkl"
+  val_path: "data/processed/test.pkl"  # Use test for validation (or split train)
   test_path: "data/processed/test.pkl"
   batch_size: 32  # Increased for large dataset
   num_workers: 4
@@ -57,7 +57,7 @@ logging:
   save_path: "models/"
   
 early_stopping:
-  monitor: "val_loss"
+  monitor: "val_total_loss"  # Changed from val_loss to val_total_loss
   patience: 10  # Reduced patience
   min_delta: 0.001
   

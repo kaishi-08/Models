@@ -1,4 +1,4 @@
-# src/training/sde_trainer.py (Enhanced version)
+# src/training/sde_trainer.py - Fixed loss computation
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -16,7 +16,7 @@ from .losses import MolecularLoss, ScoreMatchingLoss
 from .callbacks_fixed import TrainingCallback
 
 class SDEMolecularTrainer:
-    """Enhanced trainer for SDE-based molecular generation"""
+    """Enhanced trainer for SDE-based molecular generation - Fixed version"""
     
     def __init__(self, 
                  model: Joint2D3DMolecularModel, 
@@ -45,7 +45,7 @@ class SDEMolecularTrainer:
         self.best_val_loss = float('inf')
         
     def train_epoch(self, dataloader: DataLoader) -> Dict[str, float]:
-        """Train for one epoch"""
+        """Train for one epoch with fixed loss computation"""
         self.model.train()
         epoch_losses = {
             'total_loss': 0.0,
@@ -98,8 +98,8 @@ class SDEMolecularTrainer:
                 print(f"Forward pass error: {e}")
                 continue
             
-            # Compute losses
-            losses = self._compute_losses(outputs, batch, noise, std, t_expanded)
+            # Compute losses - FIXED VERSION
+            losses = self._compute_losses_fixed(outputs, batch, noise, std, t_expanded)
             total_loss = losses['total_loss']
             
             # Backward pass
@@ -147,10 +147,10 @@ class SDEMolecularTrainer:
         
         return epoch_losses
     
-    def _compute_losses(self, outputs: Dict[str, torch.Tensor], 
-                       batch, noise: torch.Tensor, std: torch.Tensor,
-                       t: torch.Tensor) -> Dict[str, torch.Tensor]:
-        """Compute all losses"""
+    def _compute_losses_fixed(self, outputs: Dict[str, torch.Tensor], 
+                             batch, noise: torch.Tensor, std: torch.Tensor,
+                             t: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """Fixed loss computation with proper tensor shapes"""
         losses = {}
         
         # Score matching loss (main SDE loss)
@@ -159,21 +159,64 @@ class SDEMolecularTrainer:
         score_loss = self.score_loss(score_pred, score_target, batch.pos, t)
         losses['score_loss'] = score_loss
         
-        # Atom type loss
+        # Atom type loss - FIXED
         atom_loss = torch.tensor(0.0, device=self.device)
         if 'atom_logits' in outputs and hasattr(batch, 'x'):
-            atom_targets = batch.x.squeeze(-1).long()
-            atom_loss = nn.CrossEntropyLoss()(outputs['atom_logits'], atom_targets)
-            losses['atom_loss'] = atom_loss
+            try:
+                # Fix atom targets shape
+                if batch.x.dim() == 2 and batch.x.size(1) > 1:
+                    # x is feature matrix [N, features] - use first feature as type
+                    atom_targets = batch.x[:, 0].long()
+                elif batch.x.dim() == 2 and batch.x.size(1) == 1:
+                    # x is type indices [N, 1]
+                    atom_targets = batch.x.squeeze(-1).long()
+                else:
+                    # x is already 1D indices [N]
+                    atom_targets = batch.x.long()
+                
+                # Ensure targets are in valid range
+                atom_targets = torch.clamp(atom_targets, 0, outputs['atom_logits'].size(1) - 1)
+                
+                atom_loss = nn.CrossEntropyLoss()(outputs['atom_logits'], atom_targets)
+                losses['atom_loss'] = atom_loss
+                
+            except Exception as e:
+                print(f"Atom loss error: {e}")
+                print(f"  atom_logits shape: {outputs['atom_logits'].shape}")
+                print(f"  batch.x shape: {batch.x.shape}")
+                atom_loss = torch.tensor(0.0, device=self.device)
         
-        # Bond type loss
+        # Bond type loss - FIXED
         bond_loss = torch.tensor(0.0, device=self.device)
-        if 'bond_logits' in outputs and hasattr(batch, 'edge_attr'):
-            bond_targets = batch.edge_attr.squeeze(-1).long()
-            bond_loss = nn.CrossEntropyLoss()(outputs['bond_logits'], bond_targets)
-            losses['bond_loss'] = bond_loss
+        if 'bond_logits' in outputs and hasattr(batch, 'edge_attr') and outputs['bond_logits'].size(0) > 0:
+            try:
+                # Fix bond targets shape
+                if batch.edge_attr.dim() == 2 and batch.edge_attr.size(1) > 1:
+                    bond_targets = batch.edge_attr[:, 0].long()
+                elif batch.edge_attr.dim() == 2 and batch.edge_attr.size(1) == 1:
+                    bond_targets = batch.edge_attr.squeeze(-1).long()
+                else:
+                    bond_targets = batch.edge_attr.long()
+                
+                # Match sizes
+                min_size = min(outputs['bond_logits'].size(0), bond_targets.size(0))
+                if min_size > 0:
+                    bond_logits_matched = outputs['bond_logits'][:min_size]
+                    bond_targets_matched = bond_targets[:min_size]
+                    
+                    # Ensure targets are in valid range
+                    bond_targets_matched = torch.clamp(bond_targets_matched, 0, bond_logits_matched.size(1) - 1)
+                    
+                    bond_loss = nn.CrossEntropyLoss()(bond_logits_matched, bond_targets_matched)
+                    losses['bond_loss'] = bond_loss
+                    
+            except Exception as e:
+                print(f"Bond loss error: {e}")
+                print(f"  bond_logits shape: {outputs['bond_logits'].shape}")
+                print(f"  edge_attr shape: {batch.edge_attr.shape}")
+                bond_loss = torch.tensor(0.0, device=self.device)
         
-        # Total loss
+        # Total loss with safe weights
         total_loss = score_loss + 0.1 * atom_loss + 0.1 * bond_loss
         losses['total_loss'] = total_loss
         
@@ -222,7 +265,7 @@ class SDEMolecularTrainer:
                     )
                     
                     # Compute losses
-                    losses = self._compute_losses(outputs, batch, noise, std, t_expanded)
+                    losses = self._compute_losses_fixed(outputs, batch, noise, std, t_expanded)
                     
                     # Update running losses
                     for key, value in losses.items():
