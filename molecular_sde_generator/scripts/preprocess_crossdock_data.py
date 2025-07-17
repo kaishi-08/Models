@@ -1,456 +1,358 @@
-# scripts/preprocess_crossdock_data.py - Preprocessing CrossDock data
-
+# scripts/preprocess_crossdock_data.py
 import os
-import sys
 import pickle
+import torch
 import numpy as np
-import pandas as pd
 from pathlib import Path
 from tqdm import tqdm
 import argparse
-from typing import Dict, List, Any, Optional
-
-# Add src to path
-sys.path.append('src')
-
-try:
-    from rdkit import Chem
-    from rdkit.Chem import AllChem
-    from Bio.PDB import PDBParser
-    from Bio.PDB.DSSP import DSSP
-except ImportError as e:
-    print(f"❌ Missing dependencies: {e}")
-    print("Install with: pip install rdkit-pypi biopython")
-    sys.exit(1)
-
-from utils.molecular_utils import MolecularFeaturizer
+from rdkit import Chem
+from rdkit.Chem import AllChem
+from Bio.PDB import PDBParser
+import warnings
+warnings.filterwarnings('ignore')
 
 class CrossDockPreprocessor:
-    """Preprocessor for CrossDock2020 dataset"""
+    """Preprocessor for CrossDock dataset"""
     
-    def __init__(self, raw_data_path: str = "data/raw/crossdock2020",
-                 processed_data_path: str = "data/processed",
-                 config: Dict = None):
+    def __init__(self, data_dir="data/crossdocked_pocket10", output_dir="data/processed", 
+                 max_samples=None):
+        self.data_dir = Path(data_dir)
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.max_samples = max_samples
         
-        self.raw_data_path = Path(raw_data_path)
-        self.processed_data_path = Path(processed_data_path)
-        self.config = config or self._get_default_config()
+        # Atom type mapping for common atoms in drug molecules
+        self.atom_types = {
+            'C': 0, 'N': 1, 'O': 2, 'S': 3, 'P': 4, 'F': 5, 
+            'Cl': 6, 'Br': 7, 'I': 8, 'H': 9, 'UNK': 10
+        }
         
-        # Create output directory
-        self.processed_data_path.mkdir(parents=True, exist_ok=True)
+        # Bond type mapping
+        self.bond_types = {
+            Chem.BondType.SINGLE: 0,
+            Chem.BondType.DOUBLE: 1, 
+            Chem.BondType.TRIPLE: 2,
+            Chem.BondType.AROMATIC: 3
+        }
         
-        self.featurizer = MolecularFeaturizer()
-        
-    def _get_default_config(self) -> Dict:
-        """Default preprocessing configuration"""
-        return {
-            'max_atoms': 50,
-            'min_atoms': 5,
-            'max_pocket_atoms': 500,
-            'pocket_radius': 10.0,
-            'pocket_cutoff': 5.0,
-            'remove_hydrogens': False,
-            'add_hydrogens': False,
-            'train_split': 0.8,
-            'val_split': 0.1,
-            'test_split': 0.1
+        # Amino acid mapping
+        self.amino_acids = {
+            'ALA': 0, 'ARG': 1, 'ASN': 2, 'ASP': 3, 'CYS': 4,
+            'GLN': 5, 'GLU': 6, 'GLY': 7, 'HIS': 8, 'ILE': 9,
+            'LEU': 10, 'LYS': 11, 'MET': 12, 'PHE': 13, 'PRO': 14,
+            'SER': 15, 'THR': 16, 'TRP': 17, 'TYR': 18, 'VAL': 19,
+            'UNK': 20
         }
     
-    def load_index(self) -> Dict:
-        """Load CrossDock index file"""
-        index_file = self.raw_data_path / "index.pkl"
-        
+    def load_splits(self):
+        """Load train/val/test splits"""
+        split_file = Path("data/split_by_name.pt")
+        if split_file.exists():
+            print("📂 Loading existing splits...")
+            splits = torch.load(split_file)
+            
+            # Create val split if doesn't exist
+            if 'val' not in splits and 'train' in splits:
+                print("📂 Creating validation split from train data...")
+                train_data = splits['train']
+                np.random.seed(42)
+                np.random.shuffle(train_data)
+                
+                # Take 10% of train for validation
+                val_size = len(train_data) // 10
+                splits['val'] = train_data[:val_size]
+                splits['train'] = train_data[val_size:]
+                
+                # Save updated splits
+                torch.save(splits, split_file)
+                print(f"✅ Updated splits: train={len(splits['train'])}, val={len(splits['val'])}, test={len(splits['test'])}")
+            
+            return splits
+        else:
+            print("📂 Creating new splits...")
+            return self.create_splits()
+    
+    def create_splits(self):
+        """Create train/val/test splits if not exist"""
+        # Get all entries from index
+        index_file = self.data_dir / "index.pkl"
         if not index_file.exists():
-            raise FileNotFoundError(f"Index file not found: {index_file}")
+            print("❌ index.pkl not found!")
+            return None
         
         with open(index_file, 'rb') as f:
             index_data = pickle.load(f)
         
-        print(f"✅ Loaded index with {len(index_data)} entries")
-        return index_data
-    
-    def process_ligand(self, ligand_file: str) -> Optional[Dict]:
-        """Process ligand SDF file"""
-        try:
-            # Read SDF file
-            supplier = Chem.SDMolSupplier(ligand_file)
-            mol = next(supplier)
-            
-            if mol is None:
-                return None
-            
-            # Remove/add hydrogens based on config
-            if self.config['remove_hydrogens']:
-                mol = Chem.RemoveHs(mol)
-            elif self.config['add_hydrogens']:
-                mol = Chem.AddHs(mol)
-            
-            # Check atom count constraints
-            num_atoms = mol.GetNumAtoms()
-            if num_atoms < self.config['min_atoms'] or num_atoms > self.config['max_atoms']:
-                return None
-            
-            # Convert to graph representation
-            graph_data = self.featurizer.mol_to_graph(mol, add_hydrogens=False)
-            
-            # Get SMILES
-            smiles = Chem.MolToSmiles(mol)
-            
-            return {
-                'atom_features': graph_data['atom_features'],
-                'positions': graph_data['positions'],
-                'edge_index': graph_data['edge_index'],
-                'edge_features': graph_data['edge_features'],
-                'smiles': smiles,
-                'num_atoms': num_atoms
-            }
-            
-        except Exception as e:
-            print(f"❌ Error processing ligand {ligand_file}: {e}")
+        # Index is list of tuples: (pocket_file, ligand_file, receptor_file, score)
+        if not isinstance(index_data, list):
+            print(f"❌ Expected list, got {type(index_data)}")
             return None
+        
+        print(f"📊 Found {len(index_data)} entries in index")
+        
+        # Random split
+        np.random.seed(42)
+        indices = list(range(len(index_data)))
+        np.random.shuffle(indices)
+        
+        n_total = len(indices)
+        n_train = int(0.8 * n_total)
+        n_val = int(0.1 * n_total)
+        
+        splits = {
+            'train': [index_data[i] for i in indices[:n_train]],
+            'val': [index_data[i] for i in indices[n_train:n_train + n_val]],
+            'test': [index_data[i] for i in indices[n_train + n_val:]]
+        }
+        
+        # Save splits
+        torch.save(splits, "data/split_by_name.pt")
+        print(f"✅ Created splits: train={len(splits['train'])}, val={len(splits['val'])}, test={len(splits['test'])}")
+        
+        return splits
     
-    def process_pocket(self, pocket_file: str, ligand_pos: np.ndarray) -> Optional[Dict]:
-        """Process protein pocket PDB file"""
+    def mol_to_features(self, mol):
+        """Convert RDKit molecule to graph features"""
+        if mol is None:
+            return None
+        
+        # Atom features
+        atom_features = []
+        positions = []
+        
+        # Get conformer for 3D coordinates
+        if mol.GetNumConformers() == 0:
+            try:
+                AllChem.EmbedMolecule(mol, randomSeed=42)
+                AllChem.MMFFOptimizeMolecule(mol)
+            except:
+                return None
+        
+        conf = mol.GetConformer()
+        
+        for atom in mol.GetAtoms():
+            # Atom type
+            atom_type = self.atom_types.get(atom.GetSymbol(), self.atom_types['UNK'])
+            
+            # Additional features
+            features = [
+                atom_type,
+                atom.GetDegree(),
+                atom.GetFormalCharge(),
+                int(atom.GetHybridization()),
+                int(atom.GetIsAromatic()),
+                atom.GetTotalNumHs(),
+                int(atom.IsInRing()),
+                atom.GetMass() / 100.0  # Normalize
+            ]
+            atom_features.append(features)
+            
+            # 3D position
+            pos = conf.GetAtomPosition(atom.GetIdx())
+            positions.append([pos.x, pos.y, pos.z])
+        
+        # Bond features
+        edge_index = []
+        edge_features = []
+        
+        for bond in mol.GetBonds():
+            start, end = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
+            bond_type = self.bond_types.get(bond.GetBondType(), 0)
+            
+            # Add both directions
+            edge_index.extend([[start, end], [end, start]])
+            edge_features.extend([[bond_type], [bond_type]])
+        
+        return {
+            'atom_features': np.array(atom_features, dtype=np.float32),
+            'positions': np.array(positions, dtype=np.float32),
+            'edge_index': np.array(edge_index, dtype=np.int64).T if edge_index else np.zeros((2, 0), dtype=np.int64),
+            'edge_features': np.array(edge_features, dtype=np.float32) if edge_features else np.zeros((0, 1), dtype=np.float32),
+            'smiles': Chem.MolToSmiles(mol)
+        }
+    
+    def pdb_to_features(self, pdb_file):
+        """Convert PDB file to protein pocket features"""
         try:
             parser = PDBParser(QUIET=True)
-            structure = parser.get_structure('pocket', pocket_file)
+            structure = parser.get_structure('pocket', pdb_file)
             
-            # Extract atoms within pocket radius
-            pocket_atoms = []
-            pocket_positions = []
+            atom_features = []
+            positions = []
             
             for model in structure:
                 for chain in model:
                     for residue in chain:
+                        res_name = residue.get_resname()
+                        res_id = residue.get_id()[1]
+                        
                         for atom in residue:
-                            atom_pos = atom.coord
+                            # Basic atom features
+                            element = atom.element.strip() if atom.element else 'C'
+                            atom_type = self.atom_types.get(element, self.atom_types['UNK'])
+                            res_type = self.amino_acids.get(res_name, self.amino_acids['UNK'])
                             
-                            # Check if within pocket radius of any ligand atom
-                            min_dist = np.min(np.linalg.norm(
-                                atom_pos - ligand_pos, axis=1
-                            ))
+                            features = [
+                                atom_type,
+                                res_type, 
+                                res_id % 1000,  # Normalize residue ID
+                                int(atom.name.startswith('C')),  # Is carbon backbone
+                                int(atom.name.startswith('N')),  # Is nitrogen backbone
+                                int(atom.name.startswith('O')),  # Is oxygen backbone
+                                0.0,  # Placeholder for surface accessibility
+                                0.0   # Placeholder for charge
+                            ]
                             
-                            if min_dist <= self.config['pocket_radius']:
-                                # Atom features: [atomic_num, residue_type, is_backbone, ...]
-                                residue_name = residue.resname
-                                atom_name = atom.name
-                                element = atom.element
-                                
-                                # Map residue to number
-                                residue_mapping = {
-                                    'ALA': 0, 'ARG': 1, 'ASN': 2, 'ASP': 3, 'CYS': 4,
-                                    'GLN': 5, 'GLU': 6, 'GLY': 7, 'HIS': 8, 'ILE': 9,
-                                    'LEU': 10, 'LYS': 11, 'MET': 12, 'PHE': 13, 'PRO': 14,
-                                    'SER': 15, 'THR': 16, 'TRP': 17, 'TYR': 18, 'VAL': 19
-                                }
-                                
-                                # Atomic number mapping
-                                atomic_nums = {'C': 6, 'N': 7, 'O': 8, 'S': 16, 'P': 15, 'H': 1}
-                                atomic_num = atomic_nums.get(element, 6)
-                                
-                                # Is backbone atom
-                                is_backbone = 1 if atom_name in ['N', 'CA', 'C', 'O'] else 0
-                                
-                                residue_type = residue_mapping.get(residue_name, 20)
-                                
-                                # Feature vector
-                                features = [
-                                    atomic_num,           # 0: atomic number
-                                    residue_type,         # 1: residue type
-                                    is_backbone,          # 2: is backbone
-                                    residue.id[1],        # 3: residue number
-                                    ord(chain.id) - ord('A'), # 4: chain ID
-                                    min_dist,             # 5: distance to ligand
-                                    0,                    # 6: placeholder
-                                    0                     # 7: placeholder
-                                ]
-                                
-                                pocket_atoms.append(features)
-                                pocket_positions.append(atom_pos)
+                            atom_features.append(features)
+                            
+                            # 3D coordinates
+                            coord = atom.coord
+                            positions.append([coord[0], coord[1], coord[2]])
             
-            if len(pocket_atoms) == 0 or len(pocket_atoms) > self.config['max_pocket_atoms']:
+            if len(atom_features) == 0:
                 return None
             
-            # Convert to numpy arrays
-            pocket_atoms = np.array(pocket_atoms, dtype=np.float32)
-            pocket_positions = np.array(pocket_positions, dtype=np.float32)
+            # Simple distance-based connectivity
+            positions_array = np.array(positions)
+            distances = np.linalg.norm(positions_array[:, None] - positions_array[None, :], axis=2)
             
-            # Create pocket graph (simple distance-based)
-            edge_index, edge_features = self._create_pocket_graph(pocket_positions)
+            edge_index = []
+            edge_features = []
+            
+            # Connect atoms within 5Å
+            for i in range(len(positions)):
+                for j in range(i + 1, len(positions)):
+                    if distances[i, j] < 5.0:
+                        edge_index.extend([[i, j], [j, i]])
+                        edge_features.extend([[distances[i, j]], [distances[i, j]]])
             
             return {
-                'atom_features': pocket_atoms,
-                'positions': pocket_positions,
-                'edge_index': edge_index,
-                'edge_features': edge_features,
-                'num_atoms': len(pocket_atoms)
+                'atom_features': np.array(atom_features, dtype=np.float32),
+                'positions': np.array(positions, dtype=np.float32),
+                'edge_index': np.array(edge_index, dtype=np.int64).T if edge_index else np.zeros((2, 0), dtype=np.int64),
+                'edge_features': np.array(edge_features, dtype=np.float32) if edge_features else np.zeros((0, 1), dtype=np.float32)
             }
             
         except Exception as e:
-            print(f"❌ Error processing pocket {pocket_file}: {e}")
+            print(f"Error processing {pdb_file}: {e}")
             return None
     
-    def _create_pocket_graph(self, positions: np.ndarray) -> tuple:
-        """Create graph connectivity for pocket"""
-        from scipy.spatial.distance import cdist
+    def process_complex(self, entry):
+        """Process a single protein-ligand complex from index entry"""
+        # Entry format: (pocket_file, ligand_file, receptor_file, score)
+        if len(entry) < 4:
+            return None
         
-        # Compute pairwise distances
-        distances = cdist(positions, positions)
+        pocket_file, ligand_file, receptor_file, score = entry[:4]
         
-        # Create edges based on cutoff
-        edge_index = []
-        edge_features = []
+        # Full paths
+        ligand_path = self.data_dir / ligand_file
+        pocket_path = self.data_dir / pocket_file
         
-        for i in range(len(positions)):
-            for j in range(i + 1, len(positions)):
-                dist = distances[i, j]
-                if dist < self.config['pocket_cutoff']:
-                    edge_index.extend([[i, j], [j, i]])
-                    edge_features.extend([dist, dist])
-        
-        edge_index = np.array(edge_index).T if edge_index else np.zeros((2, 0))
-        edge_features = np.array(edge_features).reshape(-1, 1) if edge_features else np.zeros((0, 1))
-        
-        return edge_index.astype(np.int64), edge_features.astype(np.float32)
-    
-    def process_complex(self, complex_id: str, ligand_file: str, pocket_file: str) -> Optional[Dict]:
-        """Process ligand-pocket complex"""
+        # Check if files exist
+        if not ligand_path.exists():
+            return None
         
         # Process ligand
-        ligand_data = self.process_ligand(ligand_file)
-        if ligand_data is None:
+        try:
+            mol = Chem.SDMolSupplier(str(ligand_path))[0]
+            ligand_data = self.mol_to_features(mol)
+            if ligand_data is None:
+                return None
+        except Exception as e:
             return None
         
-        # Process pocket
-        pocket_data = self.process_pocket(pocket_file, ligand_data['positions'])
-        if pocket_data is None:
-            return None
+        # Process pocket (optional)
+        pocket_data = None
+        if pocket_path.exists():
+            pocket_data = self.pdb_to_features(pocket_path)
         
-        return {
-            'complex_id': complex_id,
-            'ligand': ligand_data,
-            'pocket': pocket_data
+        complex_data = {
+            'pocket_file': pocket_file,
+            'ligand_file': ligand_file,
+            'receptor_file': receptor_file,
+            'score': score,
+            'ligand': ligand_data
         }
+        
+        if pocket_data:
+            complex_data['pocket'] = pocket_data
+        
+        return complex_data
     
-    def process_all_complexes(self, index_data: Dict) -> List[Dict]:
-        """Process all complexes in the dataset"""
-        processed_complexes = []
-        failed_count = 0
+    def process_dataset(self):
+        """Process entire dataset"""
+        print("🔄 Processing CrossDock dataset...")
         
-        print("🔄 Processing complexes...")
+        # Load splits
+        splits = self.load_splits()
+        if splits is None:
+            return
         
-        for complex_id, complex_info in tqdm(index_data.items()):
-            try:
-                # Construct file paths (adjust based on your data structure)
-                # This is a simplified example - adjust paths based on actual CrossDock structure
-                ligand_file = self.raw_data_path / f"{complex_id}_ligand.sdf"
-                pocket_file = self.raw_data_path / f"{complex_id}_pocket.pdb"
-                
-                # Check if files exist
-                if not ligand_file.exists() or not pocket_file.exists():
-                    # Try alternative naming conventions
-                    ligand_file = self.raw_data_path / complex_id / "ligand.sdf"
-                    pocket_file = self.raw_data_path / complex_id / "pocket.pdb"
+        for split_name, entries in splits.items():
+            print(f"\n📊 Processing {split_name} split ({len(entries)} entries)...")
+            
+            processed_data = []
+            failed_count = 0
+            
+            # Determine max samples for this split
+            if self.max_samples:
+                max_for_split = self.max_samples
+                if split_name == 'train':
+                    max_for_split = min(self.max_samples, len(entries))
+                else:
+                    max_for_split = min(self.max_samples // 10, len(entries))
+                print(f"⚠️  Limited to {max_for_split} samples for testing")
+            else:
+                max_for_split = len(entries)
+            
+            for i, entry in enumerate(tqdm(entries, desc=f"Processing {split_name}")):
+                if i >= max_for_split:
+                    break
                     
-                    if not ligand_file.exists() or not pocket_file.exists():
-                        failed_count += 1
-                        continue
-                
-                # Process complex
-                complex_data = self.process_complex(complex_id, str(ligand_file), str(pocket_file))
-                
-                if complex_data is not None:
-                    processed_complexes.append(complex_data)
+                complex_data = self.process_complex(entry)
+                if complex_data:
+                    processed_data.append(complex_data)
                 else:
                     failed_count += 1
-                    
-            except Exception as e:
-                print(f"❌ Error processing complex {complex_id}: {e}")
-                failed_count += 1
-                continue
-        
-        print(f"✅ Processed {len(processed_complexes)} complexes")
-        print(f"❌ Failed: {failed_count} complexes")
-        
-        return processed_complexes
-    
-    def split_data(self, complexes: List[Dict]) -> Dict[str, List[Dict]]:
-        """Split data into train/val/test sets"""
-        np.random.seed(42)  # For reproducibility
-        
-        # Shuffle complexes
-        indices = np.random.permutation(len(complexes))
-        
-        # Calculate split sizes
-        train_size = int(len(complexes) * self.config['train_split'])
-        val_size = int(len(complexes) * self.config['val_split'])
-        
-        # Split indices
-        train_indices = indices[:train_size]
-        val_indices = indices[train_size:train_size + val_size]
-        test_indices = indices[train_size + val_size:]
-        
-        splits = {
-            'train': [complexes[i] for i in train_indices],
-            'val': [complexes[i] for i in val_indices],
-            'test': [complexes[i] for i in test_indices]
-        }
-        
-        print(f"📊 Data splits:")
-        for split_name, split_data in splits.items():
-            print(f"   {split_name}: {len(split_data)} complexes")
-        
-        return splits
-    
-    def save_processed_data(self, splits: Dict[str, List[Dict]]):
-        """Save processed data to pickle files"""
-        print("💾 Saving processed data...")
-        
-        for split_name, split_data in splits.items():
-            output_file = self.processed_data_path / f"{split_name}.pkl"
             
+            print(f"✅ Processed {len(processed_data)} complexes, failed: {failed_count}")
+            
+            # Save processed data
+            output_file = self.output_dir / f"{split_name}.pkl"
             with open(output_file, 'wb') as f:
-                pickle.dump(split_data, f)
+                pickle.dump(processed_data, f)
             
-            print(f"✅ Saved {split_name}: {len(split_data)} complexes to {output_file}")
-    
-    def generate_statistics(self, splits: Dict[str, List[Dict]]):
-        """Generate dataset statistics"""
-        print("📈 Generating statistics...")
+            print(f"💾 Saved to {output_file}")
         
-        all_complexes = []
-        for split_data in splits.values():
-            all_complexes.extend(split_data)
-        
-        # Molecular statistics
-        atom_counts = []
-        bond_counts = []
-        pocket_atom_counts = []
-        
-        for complex_data in all_complexes:
-            ligand = complex_data['ligand']
-            pocket = complex_data['pocket']
-            
-            atom_counts.append(ligand['num_atoms'])
-            bond_counts.append(ligand['edge_index'].shape[1] // 2)  # Undirected
-            pocket_atom_counts.append(pocket['num_atoms'])
-        
-        stats = {
-            'total_complexes': len(all_complexes),
-            'atom_count_stats': {
-                'mean': float(np.mean(atom_counts)),
-                'std': float(np.std(atom_counts)),
-                'min': int(np.min(atom_counts)),
-                'max': int(np.max(atom_counts))
-            },
-            'bond_count_stats': {
-                'mean': float(np.mean(bond_counts)),
-                'std': float(np.std(bond_counts)),
-                'min': int(np.min(bond_counts)),
-                'max': int(np.max(bond_counts))
-            },
-            'pocket_atom_stats': {
-                'mean': float(np.mean(pocket_atom_counts)),
-                'std': float(np.std(pocket_atom_counts)),
-                'min': int(np.min(pocket_atom_counts)),
-                'max': int(np.max(pocket_atom_counts))
-            },
-            'splits': {name: len(data) for name, data in splits.items()}
-        }
-        
-        # Save statistics
-        with open(self.processed_data_path / "dataset_stats.json", 'w') as f:
-            import json
-            json.dump(stats, f, indent=2)
-        
-        print("✅ Statistics saved to dataset_stats.json")
-        
-        # Print summary
-        print("\n📊 Dataset Summary:")
-        print(f"   Total complexes: {stats['total_complexes']}")
-        print(f"   Atoms per molecule: {stats['atom_count_stats']['mean']:.1f} ± {stats['atom_count_stats']['std']:.1f}")
-        print(f"   Bonds per molecule: {stats['bond_count_stats']['mean']:.1f} ± {stats['bond_count_stats']['std']:.1f}")
-        print(f"   Pocket atoms: {stats['pocket_atom_stats']['mean']:.1f} ± {stats['pocket_atom_stats']['std']:.1f}")
-    
-    def run_preprocessing(self):
-        """Run complete preprocessing pipeline"""
-        print("🔬 CrossDock Data Preprocessing")
-        print("=" * 50)
-        
-        # Load index
-        index_data = self.load_index()
-        
-        # Process complexes
-        processed_complexes = self.process_all_complexes(index_data)
-        
-        if len(processed_complexes) == 0:
-            print("❌ No complexes were processed successfully!")
-            return False
-        
-        # Split data
-        splits = self.split_data(processed_complexes)
-        
-        # Save processed data
-        self.save_processed_data(splits)
-        
-        # Generate statistics
-        self.generate_statistics(splits)
-        
-        print("\n🎉 Preprocessing completed successfully!")
-        return True
+        print("\n🎉 Dataset preprocessing completed!")
 
 def main():
-    parser = argparse.ArgumentParser(description='Preprocess CrossDock2020 dataset')
-    parser.add_argument('--raw_path', type=str, default='data/raw/crossdock2020',
+    parser = argparse.ArgumentParser(description='Preprocess CrossDock dataset')
+    parser.add_argument('--data_dir', type=str, default='data/crossdocked_pocket10',
                        help='Path to raw CrossDock data')
-    parser.add_argument('--output_path', type=str, default='data/processed',
-                       help='Output path for processed data')
-    parser.add_argument('--config', type=str, help='Config file for preprocessing')
-    parser.add_argument('--max_atoms', type=int, default=50,
-                       help='Maximum atoms per molecule')
-    parser.add_argument('--max_pocket_atoms', type=int, default=500,
-                       help='Maximum pocket atoms')
-    parser.add_argument('--pocket_radius', type=float, default=10.0,
-                       help='Pocket radius around ligand')
+    parser.add_argument('--output_dir', type=str, default='data/processed',
+                       help='Output directory for processed data')
+    parser.add_argument('--max_samples', type=int, default=None,
+                       help='Maximum samples per split (for testing)')
     
     args = parser.parse_args()
     
-    # Load config if provided
-    config = None
-    if args.config:
-        with open(args.config, 'r') as f:
-            import yaml
-            config = yaml.safe_load(f)
-    else:
-        config = {
-            'max_atoms': args.max_atoms,
-            'min_atoms': 5,
-            'max_pocket_atoms': args.max_pocket_atoms,
-            'pocket_radius': args.pocket_radius,
-            'pocket_cutoff': 5.0,
-            'remove_hydrogens': False,
-            'add_hydrogens': False,
-            'train_split': 0.8,
-            'val_split': 0.1,
-            'test_split': 0.1
-        }
+    # Check if raw data exists
+    if not Path(args.data_dir).exists():
+        print(f"❌ Data directory not found: {args.data_dir}")
+        print("Please make sure CrossDock data is downloaded and extracted")
+        return
     
-    # Create preprocessor and run
     preprocessor = CrossDockPreprocessor(
-        raw_data_path=args.raw_path,
-        processed_data_path=args.output_path,
-        config=config
+        data_dir=args.data_dir, 
+        output_dir=args.output_dir,
+        max_samples=args.max_samples
     )
     
-    success = preprocessor.run_preprocessing()
-    
-    if success:
-        print("\n✅ Ready for training!")
-        print("Next steps:")
-        print("   1. python scripts/check_data_flow.py  # Validate data")
-        print("   2. python scripts/train_enhanced.py   # Start training")
-    else:
-        print("\n❌ Preprocessing failed!")
+    # Process dataset
+    preprocessor.process_dataset()
 
 if __name__ == "__main__":
     main()

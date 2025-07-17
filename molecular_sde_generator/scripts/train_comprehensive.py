@@ -19,15 +19,15 @@ from tqdm import tqdm
 # Add src to path
 sys.path.append('src')
 
-from models.joint_2d_3d_model import Joint2D3DMolecularModel
-from models.sde_diffusion import VESDE
-from training.sde_trainer import SDEMolecularTrainer
-from data.data_loaders import CrossDockDataLoader
-from training.callbacks_fixed import (
+from src.models.joint_2d_3d_model import Joint2D3DMolecularModel
+from src.models.sde_diffusion import VESDE
+from src.training.sde_trainer import SDEMolecularTrainer
+from src.data.data_loaders import CrossDockDataLoader
+from src.training.callbacks_fixed import (
     WandBLogger, EarlyStopping, ModelCheckpoint, 
     MolecularVisualizationCallback
 )
-from utils.molecular_utils import MolecularMetrics
+from src.utils.molecular_utils import MolecularMetrics
 
 class ComprehensiveTrainer:
     """Comprehensive trainer với monitoring và validation chi tiết"""
@@ -401,7 +401,7 @@ class ComprehensiveTrainer:
         print("\n🧪 Testing molecular generation...")
         
         try:
-            from inference.conditional_generator import ConditionalMolecularGenerator
+            from src.inference.conditional_generator import ConditionalMolecularGenerator
             
             generator = ConditionalMolecularGenerator(
                 model=self.model,
