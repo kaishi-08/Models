@@ -1,4 +1,4 @@
-# scripts/preprocess_crossdock_data.py
+# preprocess_crossdock_data_fixed.py - Fixed for both 2-element and 4-element formats
 import os
 import pickle
 import torch
@@ -12,8 +12,8 @@ from Bio.PDB import PDBParser
 import warnings
 warnings.filterwarnings('ignore')
 
-class CrossDockPreprocessor:
-    """Preprocessor for CrossDock dataset"""
+class CrossDockPreprocessorFixed:
+    """Fixed preprocessor for CrossDock dataset - handles both 2 and 4 element formats"""
     
     def __init__(self, data_dir="data/crossdocked_pocket10", output_dir="data/processed", 
                  max_samples=None):
@@ -22,7 +22,7 @@ class CrossDockPreprocessor:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.max_samples = max_samples
         
-        # Atom type mapping for common atoms in drug molecules
+        # Atom type mapping
         self.atom_types = {
             'C': 0, 'N': 1, 'O': 2, 'S': 3, 'P': 4, 'F': 5, 
             'Cl': 6, 'Br': 7, 'I': 8, 'H': 9, 'UNK': 10
@@ -48,34 +48,31 @@ class CrossDockPreprocessor:
     def load_splits(self):
         """Load train/val/test splits"""
         split_file = Path("data/split_by_name.pt")
+        
         if split_file.exists():
             print("📂 Loading existing splits...")
             splits = torch.load(split_file)
             
-            # Create val split if doesn't exist
-            if 'val' not in splits and 'train' in splits:
-                print("📂 Creating validation split from train data...")
-                train_data = splits['train']
-                np.random.seed(42)
-                np.random.shuffle(train_data)
+            # Check if we have all required splits
+            if all(key in splits for key in ['train', 'val', 'test']):
+                print(f"✅ Found all splits: train={len(splits['train'])}, val={len(splits['val'])}, test={len(splits['test'])}")
                 
-                # Take 10% of train for validation
-                val_size = len(train_data) // 10
-                splits['val'] = train_data[:val_size]
-                splits['train'] = train_data[val_size:]
+                # Check format of entries
+                if len(splits['train']) > 0:
+                    sample_entry = splits['train'][0]
+                    entry_length = len(sample_entry) if hasattr(sample_entry, '__len__') else 0
+                    print(f"📊 Entry format: {entry_length} elements per entry")
                 
-                # Save updated splits
-                torch.save(splits, split_file)
-                print(f"✅ Updated splits: train={len(splits['train'])}, val={len(splits['val'])}, test={len(splits['test'])}")
-            
-            return splits
-        else:
-            print("📂 Creating new splits...")
-            return self.create_splits()
+                return splits
+            else:
+                print("⚠️  Incomplete splits found, using index.pkl...")
+        
+        print("📂 Loading from index.pkl...")
+        return self.create_splits_from_index()
     
-    def create_splits(self):
-        """Create train/val/test splits if not exist"""
-        # Get all entries from index
+    def create_splits_from_index(self):
+        """Create splits from index.pkl if split file is not compatible"""
+        # Load index
         index_file = self.data_dir / "index.pkl"
         if not index_file.exists():
             print("❌ index.pkl not found!")
@@ -84,14 +81,9 @@ class CrossDockPreprocessor:
         with open(index_file, 'rb') as f:
             index_data = pickle.load(f)
         
-        # Index is list of tuples: (pocket_file, ligand_file, receptor_file, score)
-        if not isinstance(index_data, list):
-            print(f"❌ Expected list, got {type(index_data)}")
-            return None
-        
         print(f"📊 Found {len(index_data)} entries in index")
         
-        # Random split
+        # Create new splits
         np.random.seed(42)
         indices = list(range(len(index_data)))
         np.random.shuffle(indices)
@@ -106,11 +98,95 @@ class CrossDockPreprocessor:
             'test': [index_data[i] for i in indices[n_train + n_val:]]
         }
         
-        # Save splits
-        torch.save(splits, "data/split_by_name.pt")
-        print(f"✅ Created splits: train={len(splits['train'])}, val={len(splits['val'])}, test={len(splits['test'])}")
+        print(f"✅ Created splits from index: train={len(splits['train'])}, val={len(splits['val'])}, test={len(splits['test'])}")
         
         return splits
+    
+    def process_complex(self, entry):
+        """Process a single protein-ligand complex - handles both 2 and 4 element formats"""
+        
+        # Handle different entry formats
+        if len(entry) == 2:
+            # Format: (pocket_file, ligand_file)
+            pocket_file, ligand_file = entry
+            receptor_file = None
+            score = 0.0  # Default score
+        elif len(entry) >= 4:
+            # Format: (pocket_file, ligand_file, receptor_file, score)
+            pocket_file, ligand_file, receptor_file, score = entry[:4]
+        else:
+            print(f"⚠️  Invalid entry format: {entry}")
+            return None
+        
+        # Full paths - files are in subdirectories
+        ligand_path = self.data_dir / ligand_file
+        pocket_path = self.data_dir / pocket_file
+        
+        # Check if files exist
+        if not ligand_path.exists():
+            # Try to find the file in case path is wrong
+            parent_dir = ligand_path.parent
+            if parent_dir.exists():
+                ligand_files = list(parent_dir.glob("*.sdf"))
+                if ligand_files:
+                    ligand_path = ligand_files[0]  # Use first .sdf file found
+                else:
+                    return None
+            else:
+                return None
+        
+        if not pocket_path.exists():
+            # Try to find the pocket file
+            parent_dir = pocket_path.parent
+            if parent_dir.exists():
+                pocket_files = list(parent_dir.glob("*pocket10.pdb"))
+                if pocket_files:
+                    pocket_path = pocket_files[0]  # Use first pocket file found
+                else:
+                    pocket_path = None
+            else:
+                pocket_path = None
+        
+        # Process ligand
+        try:
+            # Try different ways to load ligand
+            if ligand_path.suffix.lower() == '.sdf':
+                supplier = Chem.SDMolSupplier(str(ligand_path))
+                mol = None
+                for m in supplier:
+                    if m is not None:
+                        mol = m
+                        break
+                if mol is None:
+                    return None
+            elif ligand_path.suffix.lower() in ['.mol', '.mol2']:
+                mol = Chem.MolFromMolFile(str(ligand_path))
+            else:
+                return None
+                
+            ligand_data = self.mol_to_features(mol)
+            if ligand_data is None:
+                return None
+        except Exception as e:
+            return None
+        
+        # Process pocket (optional)
+        pocket_data = None
+        if pocket_path and pocket_path.exists():
+            pocket_data = self.pdb_to_features(pocket_path)
+        
+        complex_data = {
+            'pocket_file': str(pocket_file),
+            'ligand_file': str(ligand_file),
+            'receptor_file': str(receptor_file) if receptor_file else None,
+            'score': float(score),
+            'ligand': ligand_data
+        }
+        
+        if pocket_data:
+            complex_data['pocket'] = pocket_data
+        
+        return complex_data
     
     def mol_to_features(self, mol):
         """Convert RDKit molecule to graph features"""
@@ -215,14 +291,17 @@ class CrossDockPreprocessor:
             
             # Simple distance-based connectivity
             positions_array = np.array(positions)
-            distances = np.linalg.norm(positions_array[:, None] - positions_array[None, :], axis=2)
+            
+            # Limit connectivity computation to avoid memory issues
+            max_atoms = min(len(positions), 1000)  # Limit to 1000 atoms
+            distances = np.linalg.norm(positions_array[:max_atoms, None] - positions_array[None, :max_atoms], axis=2)
             
             edge_index = []
             edge_features = []
             
             # Connect atoms within 5Å
-            for i in range(len(positions)):
-                for j in range(i + 1, len(positions)):
+            for i in range(max_atoms):
+                for j in range(i + 1, max_atoms):
                     if distances[i, j] < 5.0:
                         edge_index.extend([[i, j], [j, i]])
                         edge_features.extend([[distances[i, j]], [distances[i, j]]])
@@ -237,49 +316,6 @@ class CrossDockPreprocessor:
         except Exception as e:
             print(f"Error processing {pdb_file}: {e}")
             return None
-    
-    def process_complex(self, entry):
-        """Process a single protein-ligand complex from index entry"""
-        # Entry format: (pocket_file, ligand_file, receptor_file, score)
-        if len(entry) < 4:
-            return None
-        
-        pocket_file, ligand_file, receptor_file, score = entry[:4]
-        
-        # Full paths
-        ligand_path = self.data_dir / ligand_file
-        pocket_path = self.data_dir / pocket_file
-        
-        # Check if files exist
-        if not ligand_path.exists():
-            return None
-        
-        # Process ligand
-        try:
-            mol = Chem.SDMolSupplier(str(ligand_path))[0]
-            ligand_data = self.mol_to_features(mol)
-            if ligand_data is None:
-                return None
-        except Exception as e:
-            return None
-        
-        # Process pocket (optional)
-        pocket_data = None
-        if pocket_path.exists():
-            pocket_data = self.pdb_to_features(pocket_path)
-        
-        complex_data = {
-            'pocket_file': pocket_file,
-            'ligand_file': ligand_file,
-            'receptor_file': receptor_file,
-            'score': score,
-            'ligand': ligand_data
-        }
-        
-        if pocket_data:
-            complex_data['pocket'] = pocket_data
-        
-        return complex_data
     
     def process_dataset(self):
         """Process entire dataset"""
@@ -298,11 +334,12 @@ class CrossDockPreprocessor:
             
             # Determine max samples for this split
             if self.max_samples:
-                max_for_split = self.max_samples
                 if split_name == 'train':
                     max_for_split = min(self.max_samples, len(entries))
-                else:
-                    max_for_split = min(self.max_samples // 10, len(entries))
+                elif split_name == 'val':
+                    max_for_split = min(self.max_samples // 5, len(entries))
+                else:  # test
+                    max_for_split = min(100, len(entries))  # Keep test small
                 print(f"⚠️  Limited to {max_for_split} samples for testing")
             else:
                 max_for_split = len(entries)
@@ -316,22 +353,28 @@ class CrossDockPreprocessor:
                     processed_data.append(complex_data)
                 else:
                     failed_count += 1
+                    
+                # Progress update
+                if i % 1000 == 0 and i > 0:
+                    print(f"   Processed {i}/{max_for_split}, success: {len(processed_data)}, failed: {failed_count}")
             
             print(f"✅ Processed {len(processed_data)} complexes, failed: {failed_count}")
             
             # Save processed data
-            output_file = self.output_dir / f"{split_name}.pkl"
-            with open(output_file, 'wb') as f:
-                pickle.dump(processed_data, f)
-            
-            print(f"💾 Saved to {output_file}")
+            if processed_data:
+                output_file = self.output_dir / f"{split_name}.pkl"
+                with open(output_file, 'wb') as f:
+                    pickle.dump(processed_data, f)
+                print(f"💾 Saved to {output_file}")
+            else:
+                print(f"❌ No valid data for {split_name}")
         
         print("\n🎉 Dataset preprocessing completed!")
 
 def main():
-    parser = argparse.ArgumentParser(description='Preprocess CrossDock dataset')
+    parser = argparse.ArgumentParser(description='Preprocess CrossDock dataset (Fixed)')
     parser.add_argument('--data_dir', type=str, default='data/crossdocked_pocket10',
-                       help='Path to raw CrossDock data')
+                       help='Path to crossdocked_pocket10 data')
     parser.add_argument('--output_dir', type=str, default='data/processed',
                        help='Output directory for processed data')
     parser.add_argument('--max_samples', type=int, default=None,
@@ -339,19 +382,23 @@ def main():
     
     args = parser.parse_args()
     
-    # Check if raw data exists
+    # Check if data directory exists
     if not Path(args.data_dir).exists():
         print(f"❌ Data directory not found: {args.data_dir}")
-        print("Please make sure CrossDock data is downloaded and extracted")
+        print("Please make sure crossdocked_pocket10 is in the correct location")
         return
     
-    preprocessor = CrossDockPreprocessor(
+    print(f"📁 Data directory: {args.data_dir}")
+    print(f"📁 Output directory: {args.output_dir}")
+    if args.max_samples:
+        print(f"⚠️  Max samples: {args.max_samples}")
+    
+    preprocessor = CrossDockPreprocessorFixed(
         data_dir=args.data_dir, 
         output_dir=args.output_dir,
         max_samples=args.max_samples
     )
     
-    # Process dataset
     preprocessor.process_dataset()
 
 if __name__ == "__main__":

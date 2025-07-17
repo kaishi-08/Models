@@ -15,9 +15,9 @@ from collections import defaultdict, Counter
 # Add src to path
 sys.path.append('src')
 
-from data.molecular_dataset import CrossDockMolecularDataset, collate_crossdock_data
-from data.data_loaders import CrossDockDataLoader
-from utils.molecular_utils import MolecularMetrics
+from src.data.molecular_dataset import CrossDockMolecularDataset, collate_crossdock_data
+from src.data.data_loaders import CrossDockDataLoader
+from src.utils.molecular_utils import MolecularMetrics
 from rdkit import Chem
 
 class DataFlowChecker:
@@ -352,7 +352,7 @@ class DataFlowChecker:
         
         try:
             # Import model
-            from models.joint_2d_3d_model import Joint2D3DMolecularModel
+            from src.models.joint_2d_3d_model import Joint2D3DMolecularModel
             
             # Create model
             model = Joint2D3DMolecularModel(

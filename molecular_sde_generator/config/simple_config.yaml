@@ -1,20 +1,22 @@
+# Simple config for CrossDock training - Updated for large dataset
 data:
   train_path: "data/processed/train.pkl"
   val_path: "data/processed/val.pkl"
   test_path: "data/processed/test.pkl"
-  batch_size: 16  # Reduced for memory efficiency
+  batch_size: 32  # Increased for large dataset
   num_workers: 4
   pin_memory: true
   shuffle: true
   include_pocket: true
   augment: true
+  max_atoms: 50
 
 model:
-  atom_types: 11  # Updated for CrossDock atom types
+  atom_types: 11  # C, N, O, S, P, F, Cl, Br, I, H, Unknown
   bond_types: 4   # Single, Double, Triple, Aromatic
-  hidden_dim: 128
-  pocket_dim: 256
-  num_layers: 4
+  hidden_dim: 256  # Increased for large dataset
+  pocket_dim: 512  # Increased for large dataset
+  num_layers: 6    # Increased for large dataset
   max_radius: 10.0
 
 sde:
@@ -25,21 +27,21 @@ sde:
   prediction_type: "score"
 
 training:
-  num_epochs: 200
-  lr: 0.0005  # Slightly reduced
+  num_epochs: 50   # Reasonable for large dataset
+  lr: 0.0001       # Slightly lower for stability
   weight_decay: 0.0001
   grad_clip_norm: 1.0
   accumulate_grad_batches: 1
   
 optimizer:
   type: "adamw"
-  lr: 0.0005
+  lr: 0.0001
   betas: [0.9, 0.999]
   weight_decay: 0.0001
   
 scheduler:
   type: "cosine_annealing"
-  T_max: 200
+  T_max: 50
   eta_min: 0.00001
   
 loss_weights:
@@ -48,20 +50,20 @@ loss_weights:
   bond_type_loss: 0.1
   
 logging:
-  project_name: "crossdock-molecular-sde-generation"
-  log_every_n_steps: 50
-  val_check_interval: 500
+  project_name: "crossdock-molecular-sde"
+  log_every_n_steps: 100  # Less frequent logging
+  val_check_interval: 1000  # Less frequent validation
   save_top_k: 3
   save_path: "models/"
   
 early_stopping:
   monitor: "val_loss"
-  patience: 30
+  patience: 10  # Reduced patience
   min_delta: 0.001
   
 generation:
   num_molecules: 100
   max_atoms: 50
-  guidance_scale: 1.5
+  guidance_scale: 1.0
   num_steps: 1000
   sampling_method: "ddpm"
