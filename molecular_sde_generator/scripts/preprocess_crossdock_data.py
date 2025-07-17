@@ -1,4 +1,3 @@
-# preprocess_crossdock_data_fixed.py - Fixed for both 2-element and 4-element formats
 import os
 import pickle
 import torch
@@ -12,8 +11,8 @@ from Bio.PDB import PDBParser
 import warnings
 warnings.filterwarnings('ignore')
 
-class CrossDockPreprocessorFixed:
-    """Fixed preprocessor for CrossDock dataset - handles both 2 and 4 element formats"""
+class CrossDockPreprocessorTrainTestOnly:
+    """Preprocessor cho CrossDock dataset - chỉ train và test như gốc"""
     
     def __init__(self, data_dir="data/crossdocked_pocket10", output_dir="data/processed", 
                  max_samples=None):
@@ -46,61 +45,71 @@ class CrossDockPreprocessorFixed:
         }
     
     def load_splits(self):
-        """Load train/val/test splits"""
+        """Load train/test splits - CHỈ 2 splits như CrossDock gốc"""
         split_file = Path("data/split_by_name.pt")
         
         if split_file.exists():
             print("📂 Loading existing splits...")
-            splits = torch.load(split_file)
-            
-            # Check if we have all required splits
-            if all(key in splits for key in ['train', 'val', 'test']):
-                print(f"✅ Found all splits: train={len(splits['train'])}, val={len(splits['val'])}, test={len(splits['test'])}")
+            try:
+                splits = torch.load(split_file)
                 
-                # Check format of entries
-                if len(splits['train']) > 0:
-                    sample_entry = splits['train'][0]
-                    entry_length = len(sample_entry) if hasattr(sample_entry, '__len__') else 0
-                    print(f"📊 Entry format: {entry_length} elements per entry")
-                
-                return splits
-            else:
-                print("⚠️  Incomplete splits found, using index.pkl...")
+                # Kiểm tra xem có đúng format train/test không
+                if 'train' in splits and 'test' in splits:
+                    print(f"✅ Found train/test splits: train={len(splits['train'])}, test={len(splits['test'])}")
+                    
+                    # Nếu có val thì bỏ qua, chỉ dùng train/test
+                    if 'val' in splits:
+                        print("⚠️  Found validation set but ignoring (using train/test only)")
+                        splits = {'train': splits['train'], 'test': splits['test']}
+                    
+                    return splits
+                else:
+                    print("⚠️  Invalid split format, creating new train/test splits...")
+            except Exception as e:
+                print(f"⚠️  Error loading splits: {e}, creating new splits...")
         
-        print("📂 Loading from index.pkl...")
-        return self.create_splits_from_index()
+        print("🔧 Creating train/test splits from index.pkl...")
+        return self.create_train_test_splits()
     
-    def create_splits_from_index(self):
-        """Create splits from index.pkl if split file is not compatible"""
+    def create_train_test_splits(self):
+        """Tạo splits train/test từ index.pkl (80/20 split)"""
         # Load index
         index_file = self.data_dir / "index.pkl"
         if not index_file.exists():
-            print("❌ index.pkl not found!")
+            print(f"❌ index.pkl not found at {index_file}")
             return None
         
-        with open(index_file, 'rb') as f:
-            index_data = pickle.load(f)
-        
-        print(f"📊 Found {len(index_data)} entries in index")
-        
-        # Create new splits
-        np.random.seed(42)
-        indices = list(range(len(index_data)))
-        np.random.shuffle(indices)
-        
-        n_total = len(indices)
-        n_train = int(0.8 * n_total)
-        n_val = int(0.1 * n_total)
-        
-        splits = {
-            'train': [index_data[i] for i in indices[:n_train]],
-            'val': [index_data[i] for i in indices[n_train:n_train + n_val]],
-            'test': [index_data[i] for i in indices[n_train + n_val:]]
-        }
-        
-        print(f"✅ Created splits from index: train={len(splits['train'])}, val={len(splits['val'])}, test={len(splits['test'])}")
-        
-        return splits
+        try:
+            with open(index_file, 'rb') as f:
+                index_data = pickle.load(f)
+            
+            print(f"📊 Found {len(index_data)} entries in index")
+            
+            # Tạo train/test splits (80/20)
+            np.random.seed(42)
+            indices = list(range(len(index_data)))
+            np.random.shuffle(indices)
+            
+            n_total = len(indices)
+            n_train = int(0.8 * n_total)  # 80% cho train
+            
+            splits = {
+                'train': [index_data[i] for i in indices[:n_train]],
+                'test': [index_data[i] for i in indices[n_train:]]
+            }
+            
+            print(f"✅ Created train/test splits: train={len(splits['train'])}, test={len(splits['test'])}")
+            
+            # Lưu splits
+            split_file = Path("data/split_by_name.pt")
+            torch.save(splits, split_file)
+            print(f"💾 Train/test splits saved to {split_file}")
+            
+            return splits
+            
+        except Exception as e:
+            print(f"❌ Error creating splits: {e}")
+            return None
     
     def process_complex(self, entry):
         """Process a single protein-ligand complex - handles both 2 and 4 element formats"""
@@ -115,7 +124,6 @@ class CrossDockPreprocessorFixed:
             # Format: (pocket_file, ligand_file, receptor_file, score)
             pocket_file, ligand_file, receptor_file, score = entry[:4]
         else:
-            print(f"⚠️  Invalid entry format: {entry}")
             return None
         
         # Full paths - files are in subdirectories
@@ -139,7 +147,7 @@ class CrossDockPreprocessorFixed:
             # Try to find the pocket file
             parent_dir = pocket_path.parent
             if parent_dir.exists():
-                pocket_files = list(parent_dir.glob("*pocket10.pdb"))
+                pocket_files = list(parent_dir.glob("*pocket*.pdb"))
                 if pocket_files:
                     pocket_path = pocket_files[0]  # Use first pocket file found
                 else:
@@ -314,19 +322,25 @@ class CrossDockPreprocessorFixed:
             }
             
         except Exception as e:
-            print(f"Error processing {pdb_file}: {e}")
             return None
     
     def process_dataset(self):
-        """Process entire dataset"""
-        print("🔄 Processing CrossDock dataset...")
+        """Process entire dataset - CHỈ train và test"""
+        print("🔄 Processing CrossDock dataset (train/test only)...")
         
         # Load splits
         splits = self.load_splits()
         if splits is None:
+            print("❌ Failed to load or create splits!")
             return
         
-        for split_name, entries in splits.items():
+        # CHỈ xử lý train và test
+        for split_name in ['train', 'test']:
+            if split_name not in splits:
+                print(f"❌ Missing {split_name} split!")
+                continue
+                
+            entries = splits[split_name]
             print(f"\n📊 Processing {split_name} split ({len(entries)} entries)...")
             
             processed_data = []
@@ -336,10 +350,8 @@ class CrossDockPreprocessorFixed:
             if self.max_samples:
                 if split_name == 'train':
                     max_for_split = min(self.max_samples, len(entries))
-                elif split_name == 'val':
-                    max_for_split = min(self.max_samples // 5, len(entries))
                 else:  # test
-                    max_for_split = min(100, len(entries))  # Keep test small
+                    max_for_split = min(self.max_samples // 4, len(entries))  # Test = 1/4 của train
                 print(f"⚠️  Limited to {max_for_split} samples for testing")
             else:
                 max_for_split = len(entries)
@@ -353,10 +365,6 @@ class CrossDockPreprocessorFixed:
                     processed_data.append(complex_data)
                 else:
                     failed_count += 1
-                    
-                # Progress update
-                if i % 1000 == 0 and i > 0:
-                    print(f"   Processed {i}/{max_for_split}, success: {len(processed_data)}, failed: {failed_count}")
             
             print(f"✅ Processed {len(processed_data)} complexes, failed: {failed_count}")
             
@@ -369,10 +377,10 @@ class CrossDockPreprocessorFixed:
             else:
                 print(f"❌ No valid data for {split_name}")
         
-        print("\n🎉 Dataset preprocessing completed!")
+        print("\n🎉 Dataset preprocessing completed! (train/test only)")
 
 def main():
-    parser = argparse.ArgumentParser(description='Preprocess CrossDock dataset (Fixed)')
+    parser = argparse.ArgumentParser(description='Preprocess CrossDock dataset (Train/Test only)')
     parser.add_argument('--data_dir', type=str, default='data/crossdocked_pocket10',
                        help='Path to crossdocked_pocket10 data')
     parser.add_argument('--output_dir', type=str, default='data/processed',
@@ -390,10 +398,11 @@ def main():
     
     print(f"📁 Data directory: {args.data_dir}")
     print(f"📁 Output directory: {args.output_dir}")
+    print(f"🎯 Using train/test splits only (no validation)")
     if args.max_samples:
         print(f"⚠️  Max samples: {args.max_samples}")
     
-    preprocessor = CrossDockPreprocessorFixed(
+    preprocessor = CrossDockPreprocessorTrainTestOnly(
         data_dir=args.data_dir, 
         output_dir=args.output_dir,
         max_samples=args.max_samples
