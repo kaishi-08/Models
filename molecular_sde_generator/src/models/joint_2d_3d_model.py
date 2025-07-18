@@ -11,12 +11,16 @@ class Joint2D3DMolecularModel(MolecularModel):
     
     def __init__(self, atom_types: int = 100, bond_types: int = 5,
                  hidden_dim: int = 128, pocket_dim: int = 256,
-                 num_layers: int = 4, max_radius: float = 10.0):
+                 num_layers: int = 4, max_radius: float = 10.0,
+                 max_pocket_atoms: int = 1000, 
+                 selection_strategy: str = "adaptive"):  # Added selection strategy parameter
         super().__init__(atom_types, bond_types, hidden_dim)
         
         self.pocket_dim = pocket_dim
         self.num_layers = num_layers
         self.max_radius = max_radius
+        self.max_pocket_atoms = max_pocket_atoms  # Store parameter
+        self.selection_strategy = selection_strategy  # Store selection strategy
         
         # Input feature dimensions (assume features are already processed)
         # If x has shape [N, feature_dim], we use a linear layer instead of embedding
@@ -40,11 +44,13 @@ class Joint2D3DMolecularModel(MolecularModel):
             max_radius=max_radius
         )
         
-        # Pocket encoder
+        # Pocket encoder - FIXED with smart selection parameters
         self.pocket_encoder = ProteinPocketEncoder(
-            node_features=self.atom_feature_dim,  # Pocket also uses same feature dim
+            node_features=self.atom_feature_dim,
             hidden_dim=hidden_dim,
-            output_dim=pocket_dim
+            output_dim=pocket_dim,
+            max_pocket_atoms=max_pocket_atoms,
+            selection_strategy=selection_strategy  # Pass selection strategy
         )
         
         # Cross-attention for pocket conditioning
@@ -79,10 +85,6 @@ class Joint2D3DMolecularModel(MolecularModel):
             batch: Batch indices [N]
             pocket_*: Protein pocket features
         """
-        # Debug prints to understand data format
-        # print(f"DEBUG - x shape: {x.shape}, dtype: {x.dtype}")
-        # print(f"DEBUG - edge_attr shape: {edge_attr.shape}, dtype: {edge_attr.dtype}")
-        
         # Handle input features - x is already processed features, not indices
         if x.dim() == 2 and x.size(1) == self.atom_feature_dim:
             # x is feature matrix [N, feature_dim]
@@ -118,8 +120,12 @@ class Joint2D3DMolecularModel(MolecularModel):
         # Pocket conditioning
         if pocket_x is not None and pocket_pos is not None:
             try:
+                # Pass ligand position for binding site strategy
+                ligand_pos = pos if self.selection_strategy == "binding_site" else None
+                
                 pocket_repr = self.pocket_encoder(
-                    pocket_x.float(), pocket_pos, pocket_edge_index, pocket_batch
+                    pocket_x.float(), pocket_pos, pocket_edge_index, pocket_batch,
+                    ligand_pos=ligand_pos  # Pass ligand positions for smart selection
                 )
                 h_2d = self.pocket_conditioner(h_2d, pocket_repr, batch)
                 h_3d = self.pocket_conditioner(h_3d, pocket_repr, batch)
