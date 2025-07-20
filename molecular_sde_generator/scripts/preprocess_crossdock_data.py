@@ -1,3 +1,4 @@
+# scripts/preprocess_crossdock_generation.py - Generation-focused preprocessing
 import os
 import pickle
 import torch
@@ -11,9 +12,8 @@ from Bio.PDB import PDBParser
 import warnings
 warnings.filterwarnings('ignore')
 
-class CrossDockPreprocessorTrainTestOnly:
-    """Preprocessor cho CrossDock dataset - chỉ train và test như gốc"""
-    
+class GenerationFocusedPreprocessor:
+
     def __init__(self, data_dir="data/crossdocked_pocket10", output_dir="data/processed", 
                  max_samples=None):
         self.data_dir = Path(data_dir)
@@ -21,13 +21,13 @@ class CrossDockPreprocessorTrainTestOnly:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.max_samples = max_samples
         
-        # Atom type mapping
+        # Limited to most common drug-like atoms for stable generation
         self.atom_types = {
-            'C': 0, 'N': 1, 'O': 2, 'S': 3, 'P': 4, 'F': 5, 
-            'Cl': 6, 'Br': 7, 'I': 8, 'H': 9, 'UNK': 10
+            'C': 0, 'N': 1, 'O': 2, 'S': 3, 'F': 4, 'Cl': 5, 
+            'Br': 6, 'I': 7, 'P': 8, 'UNK': 9
         }
         
-        # Bond type mapping
+        # Generation-focused bond types (critical for molecular validity)
         self.bond_types = {
             Chem.BondType.SINGLE: 0,
             Chem.BondType.DOUBLE: 1, 
@@ -35,8 +35,8 @@ class CrossDockPreprocessorTrainTestOnly:
             Chem.BondType.AROMATIC: 3
         }
         
-        # Amino acid mapping
-        self.amino_acids = {
+        # Pocket residue types (Cα representation like DiffSBDD)
+        self.residue_types = {
             'ALA': 0, 'ARG': 1, 'ASN': 2, 'ASP': 3, 'CYS': 4,
             'GLN': 5, 'GLU': 6, 'GLY': 7, 'HIS': 8, 'ILE': 9,
             'LEU': 10, 'LYS': 11, 'MET': 12, 'PHE': 13, 'PRO': 14,
@@ -45,26 +45,18 @@ class CrossDockPreprocessorTrainTestOnly:
         }
     
     def load_splits(self):
-        """Load train/test splits - CHỈ 2 splits như CrossDock gốc"""
+        """Load train/test splits"""
         split_file = Path("data/split_by_name.pt")
         
         if split_file.exists():
             print("📂 Loading existing splits...")
             try:
                 splits = torch.load(split_file)
-                
-                # Kiểm tra xem có đúng format train/test không
                 if 'train' in splits and 'test' in splits:
                     print(f"✅ Found train/test splits: train={len(splits['train'])}, test={len(splits['test'])}")
-                    
-                    # Nếu có val thì bỏ qua, chỉ dùng train/test
-                    if 'val' in splits:
-                        print("⚠️  Found validation set but ignoring (using train/test only)")
-                        splits = {'train': splits['train'], 'test': splits['test']}
-                    
                     return splits
                 else:
-                    print("⚠️  Invalid split format, creating new train/test splits...")
+                    print("⚠️  Invalid split format, creating new splits...")
             except Exception as e:
                 print(f"⚠️  Error loading splits: {e}, creating new splits...")
         
@@ -72,8 +64,7 @@ class CrossDockPreprocessorTrainTestOnly:
         return self.create_train_test_splits()
     
     def create_train_test_splits(self):
-        """Tạo splits train/test từ index.pkl (80/20 split)"""
-        # Load index
+        """Create train/test splits"""
         index_file = self.data_dir / "index.pkl"
         if not index_file.exists():
             print(f"❌ index.pkl not found at {index_file}")
@@ -85,25 +76,23 @@ class CrossDockPreprocessorTrainTestOnly:
             
             print(f"📊 Found {len(index_data)} entries in index")
             
-            # Tạo train/test splits (80/20)
             np.random.seed(42)
             indices = list(range(len(index_data)))
             np.random.shuffle(indices)
             
             n_total = len(indices)
-            n_train = int(0.8 * n_total)  # 80% cho train
+            n_train = int(0.8 * n_total)
             
             splits = {
                 'train': [index_data[i] for i in indices[:n_train]],
                 'test': [index_data[i] for i in indices[n_train:]]
             }
             
-            print(f"✅ Created train/test splits: train={len(splits['train'])}, test={len(splits['test'])}")
+            print(f"✅ Created splits: train={len(splits['train'])}, test={len(splits['test'])}")
             
-            # Lưu splits
             split_file = Path("data/split_by_name.pt")
             torch.save(splits, split_file)
-            print(f"💾 Train/test splits saved to {split_file}")
+            print(f"💾 Splits saved to {split_file}")
             
             return splits
             
@@ -112,52 +101,47 @@ class CrossDockPreprocessorTrainTestOnly:
             return None
     
     def process_complex(self, entry):
-        """Process a single protein-ligand complex - handles both 2 and 4 element formats"""
+        """Process complex with generation-focused features"""
         
-        # Handle different entry formats
+        # Handle entry formats
         if len(entry) == 2:
-            # Format: (pocket_file, ligand_file)
             pocket_file, ligand_file = entry
             receptor_file = None
-            score = 0.0  # Default score
+            score = 0.0
         elif len(entry) >= 4:
-            # Format: (pocket_file, ligand_file, receptor_file, score)
             pocket_file, ligand_file, receptor_file, score = entry[:4]
         else:
             return None
         
-        # Full paths - files are in subdirectories
         ligand_path = self.data_dir / ligand_file
         pocket_path = self.data_dir / pocket_file
         
-        # Check if files exist
+        # Check ligand file
         if not ligand_path.exists():
-            # Try to find the file in case path is wrong
             parent_dir = ligand_path.parent
             if parent_dir.exists():
                 ligand_files = list(parent_dir.glob("*.sdf"))
                 if ligand_files:
-                    ligand_path = ligand_files[0]  # Use first .sdf file found
+                    ligand_path = ligand_files[0]
                 else:
                     return None
             else:
                 return None
         
+        # Check pocket file
         if not pocket_path.exists():
-            # Try to find the pocket file
             parent_dir = pocket_path.parent
             if parent_dir.exists():
                 pocket_files = list(parent_dir.glob("*pocket*.pdb"))
                 if pocket_files:
-                    pocket_path = pocket_files[0]  # Use first pocket file found
+                    pocket_path = pocket_files[0]
                 else:
                     pocket_path = None
             else:
                 pocket_path = None
         
-        # Process ligand
+        # Process ligand with generation-focused features
         try:
-            # Try different ways to load ligand
             if ligand_path.suffix.lower() == '.sdf':
                 supplier = Chem.SDMolSupplier(str(ligand_path))
                 mol = None
@@ -172,16 +156,16 @@ class CrossDockPreprocessorTrainTestOnly:
             else:
                 return None
                 
-            ligand_data = self.mol_to_features(mol)
+            ligand_data = self.mol_to_generation_features(mol)
             if ligand_data is None:
                 return None
         except Exception as e:
             return None
         
-        # Process pocket (optional)
+        # Process pocket with Cα representation 
         pocket_data = None
         if pocket_path and pocket_path.exists():
-            pocket_data = self.pdb_to_features(pocket_path)
+            pocket_data = self.pdb_to_ca_features(pocket_path)
         
         complex_data = {
             'pocket_file': str(pocket_file),
@@ -196,16 +180,15 @@ class CrossDockPreprocessorTrainTestOnly:
         
         return complex_data
     
-    def mol_to_features(self, mol):
-        """Convert RDKit molecule to graph features"""
+    def mol_to_generation_features(self, mol):
+        """
+        Convert molecule to generation-focused features
+        Based on DiffSBDD, Pocket2Mol atom representation
+        """
         if mol is None:
             return None
         
-        # Atom features
-        atom_features = []
-        positions = []
-        
-        # Get conformer for 3D coordinates
+        # Generate 3D coordinates if needed
         if mol.GetNumConformers() == 0:
             try:
                 AllChem.EmbedMolecule(mol, randomSeed=42)
@@ -215,28 +198,31 @@ class CrossDockPreprocessorTrainTestOnly:
         
         conf = mol.GetConformer()
         
+        # GENERATION-FOCUSED ATOM FEATURES (minimal but essential)
+        atom_features = []
+        positions = []
+        
         for atom in mol.GetAtoms():
-            # Atom type
+            # Core features for generation (based on DiffSBDD)
             atom_type = self.atom_types.get(atom.GetSymbol(), self.atom_types['UNK'])
             
-            # Additional features
+            # Minimal but essential features for valid molecular generation
             features = [
-                atom_type,
-                atom.GetDegree(),
-                atom.GetFormalCharge(),
-                int(atom.GetHybridization()),
-                int(atom.GetIsAromatic()),
-                atom.GetTotalNumHs(),
-                int(atom.IsInRing()),
-                atom.GetMass() / 100.0  # Normalize
+                atom_type,                        # 0: Atom type (most important)
+                atom.GetDegree(),                # 1: Degree (connectivity)
+                atom.GetFormalCharge() + 2,      # 2: Formal charge (shifted to be positive)
+                int(atom.GetIsAromatic()),       # 3: Aromatic (important for ring systems)
+                atom.GetTotalNumHs(),            # 4: Hydrogen count (valence)
+                int(atom.IsInRing()),            # 5: In ring (structural constraint)
             ]
+            
             atom_features.append(features)
             
-            # 3D position
+            # 3D coordinates (essential for SDE)
             pos = conf.GetAtomPosition(atom.GetIdx())
             positions.append([pos.x, pos.y, pos.z])
         
-        # Bond features
+        # GENERATION-FOCUSED BOND FEATURES
         edge_index = []
         edge_features = []
         
@@ -244,26 +230,44 @@ class CrossDockPreprocessorTrainTestOnly:
             start, end = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
             bond_type = self.bond_types.get(bond.GetBondType(), 0)
             
-            # Add both directions
+            # Minimal bond features for generation
+            bond_feature = [
+                bond_type,                        # 0: Bond type (essential)
+                int(bond.GetIsConjugated()),     # 1: Conjugated (aromaticity)
+                int(bond.IsInRing()),            # 2: In ring (constraints)
+            ]
+            
+            # Add both directions (undirected graph)
             edge_index.extend([[start, end], [end, start]])
-            edge_features.extend([[bond_type], [bond_type]])
+            edge_features.extend([bond_feature, bond_feature])
+        
+        # Validate molecular structure
+        if not self._is_valid_molecule(mol, atom_features, edge_index):
+            return None
         
         return {
-            'atom_features': np.array(atom_features, dtype=np.float32),
-            'positions': np.array(positions, dtype=np.float32),
+            'atom_features': np.array(atom_features, dtype=np.float32),  # [N, 6]
+            'positions': np.array(positions, dtype=np.float32),          # [N, 3]
             'edge_index': np.array(edge_index, dtype=np.int64).T if edge_index else np.zeros((2, 0), dtype=np.int64),
-            'edge_features': np.array(edge_features, dtype=np.float32) if edge_features else np.zeros((0, 1), dtype=np.float32),
-            'smiles': Chem.MolToSmiles(mol)
+            'edge_features': np.array(edge_features, dtype=np.float32) if edge_features else np.zeros((0, 3), dtype=np.float32),
+            'smiles': Chem.MolToSmiles(mol),
+            'num_atoms': mol.GetNumAtoms(),
+            'num_bonds': mol.GetNumBonds(),
+            'molecular_weight': Chem.rdMolDescriptors.CalcExactMolWt(mol),
         }
     
-    def pdb_to_features(self, pdb_file):
-        """Convert PDB file to protein pocket features"""
+    def pdb_to_ca_features(self, pdb_file):
+        """
+        Convert PDB to Cα-only representation (like DiffSBDD)
+        This is the standard approach in generation models
+        """
         try:
             parser = PDBParser(QUIET=True)
             structure = parser.get_structure('pocket', pdb_file)
             
-            atom_features = []
-            positions = []
+            ca_positions = []
+            ca_features = []
+            residue_sequence = []
             
             for model in structure:
                 for chain in model:
@@ -271,62 +275,118 @@ class CrossDockPreprocessorTrainTestOnly:
                         res_name = residue.get_resname()
                         res_id = residue.get_id()[1]
                         
-                        for atom in residue:
-                            # Basic atom features
-                            element = atom.element.strip() if atom.element else 'C'
-                            atom_type = self.atom_types.get(element, self.atom_types['UNK'])
-                            res_type = self.amino_acids.get(res_name, self.amino_acids['UNK'])
+                        # Get Cα atom (like DiffSBDD)
+                        if 'CA' in residue:
+                            ca_atom = residue['CA']
+                            
+                            # Residue-level features (generation-focused)
+                            res_type = self.residue_types.get(res_name, self.residue_types['UNK'])
                             
                             features = [
-                                atom_type,
-                                res_type, 
-                                res_id % 1000,  # Normalize residue ID
-                                int(atom.name.startswith('C')),  # Is carbon backbone
-                                int(atom.name.startswith('N')),  # Is nitrogen backbone
-                                int(atom.name.startswith('O')),  # Is oxygen backbone
-                                0.0,  # Placeholder for surface accessibility
-                                0.0   # Placeholder for charge
+                                res_type,                        # 0: Residue type
+                                res_id % 100,                   # 1: Residue position (mod 100)
+                                int(self._is_hydrophobic(res_name)),   # 2: Hydrophobic
+                                int(self._is_charged(res_name)),       # 3: Charged
+                                int(self._is_polar(res_name)),         # 4: Polar
+                                int(self._is_aromatic(res_name)),      # 5: Aromatic
+                                ca_atom.bfactor / 50.0,               # 6: B-factor (flexibility)
                             ]
                             
-                            atom_features.append(features)
+                            ca_features.append(features)
                             
-                            # 3D coordinates
-                            coord = atom.coord
-                            positions.append([coord[0], coord[1], coord[2]])
+                            # Cα coordinates
+                            coord = ca_atom.coord
+                            ca_positions.append([coord[0], coord[1], coord[2]])
+                            
+                            # Store sequence
+                            residue_sequence.append(res_name)
             
-            if len(atom_features) == 0:
+            if len(ca_features) == 0:
                 return None
             
-            # Simple distance-based connectivity
-            positions_array = np.array(positions)
-            
-            # Limit connectivity computation to avoid memory issues
-            max_atoms = min(len(positions), 1000)  # Limit to 1000 atoms
-            distances = np.linalg.norm(positions_array[:max_atoms, None] - positions_array[None, :max_atoms], axis=2)
-            
-            edge_index = []
-            edge_features = []
-            
-            # Connect atoms within 5Å
-            for i in range(max_atoms):
-                for j in range(i + 1, max_atoms):
-                    if distances[i, j] < 5.0:
-                        edge_index.extend([[i, j], [j, i]])
-                        edge_features.extend([[distances[i, j]], [distances[i, j]]])
+            # Generate Cα-Cα connectivity (distance-based)
+            positions_array = np.array(ca_positions)
+            edge_index, edge_features = self._compute_ca_connectivity(positions_array)
             
             return {
-                'atom_features': np.array(atom_features, dtype=np.float32),
-                'positions': np.array(positions, dtype=np.float32),
-                'edge_index': np.array(edge_index, dtype=np.int64).T if edge_index else np.zeros((2, 0), dtype=np.int64),
-                'edge_features': np.array(edge_features, dtype=np.float32) if edge_features else np.zeros((0, 1), dtype=np.float32)
+                'atom_features': np.array(ca_features, dtype=np.float32),    # [N_res, 7]
+                'positions': np.array(ca_positions, dtype=np.float32),       # [N_res, 3]
+                'edge_index': edge_index,                                     # [2, E]
+                'edge_features': edge_features,                               # [E, 1]
+                'residue_sequence': residue_sequence,
+                'num_residues': len(residue_sequence),
             }
             
         except Exception as e:
             return None
     
+    def _is_valid_molecule(self, mol, atom_features, edge_index):
+        """Validate molecule for generation"""
+        # Check basic validity
+        if mol.GetNumAtoms() < 5 or mol.GetNumAtoms() > 50:  # Reasonable size
+            return False
+        
+        # Check connectivity
+        if len(edge_index) == 0 and mol.GetNumAtoms() > 1:
+            return False
+        
+        # Check for valid atom types
+        for features in atom_features:
+            if features[0] == self.atom_types['UNK']:  # Too many unknown atoms
+                return False
+        
+        return True
+    
+    def _is_hydrophobic(self, res_name):
+        """Check if residue is hydrophobic"""
+        hydrophobic = {'ALA', 'VAL', 'ILE', 'LEU', 'MET', 'PHE', 'TRP', 'PRO'}
+        return res_name in hydrophobic
+    
+    def _is_charged(self, res_name):
+        """Check if residue is charged"""
+        charged = {'ARG', 'LYS', 'ASP', 'GLU', 'HIS'}
+        return res_name in charged
+    
+    def _is_polar(self, res_name):
+        """Check if residue is polar"""
+        polar = {'SER', 'THR', 'ASN', 'GLN', 'TYR', 'CYS'}
+        return res_name in polar
+    
+    def _is_aromatic(self, res_name):
+        """Check if residue is aromatic"""
+        aromatic = {'PHE', 'TRP', 'TYR', 'HIS'}
+        return res_name in aromatic
+    
+    def _compute_ca_connectivity(self, positions):
+        """Compute Cα-Cα connectivity for pocket representation"""
+        if len(positions) <= 1:
+            return np.zeros((2, 0), dtype=np.int64), np.zeros((0, 1), dtype=np.float32)
+        
+        # Distance-based connectivity (like DiffSBDD)
+        distances = np.linalg.norm(positions[:, None] - positions[None, :], axis=2)
+        
+        edge_index = []
+        edge_features = []
+        
+        # Connect residues within 10 Å (standard pocket cutoff)
+        cutoff = 10.0
+        
+        for i in range(len(positions)):
+            for j in range(i + 1, len(positions)):
+                if distances[i, j] <= cutoff:
+                    edge_index.extend([[i, j], [j, i]])
+                    edge_features.extend([[distances[i, j]], [distances[i, j]]])
+        
+        if edge_index:
+            return (np.array(edge_index, dtype=np.int64).T, 
+                   np.array(edge_features, dtype=np.float32))
+        else:
+            return np.zeros((2, 0), dtype=np.int64), np.zeros((0, 1), dtype=np.float32)
+    
     def process_dataset(self):
-        """Process entire dataset - CHỈ train và test"""
-        print("🔄 Processing CrossDock dataset (train/test only)...")
+        """Process dataset with generation-focused features"""
+        print("🔄 Processing CrossDock dataset for molecular generation...")
+        print("   Features optimized for DiffSBDD/Pocket2Mol-style generation")
         
         # Load splits
         splits = self.load_splits()
@@ -334,7 +394,7 @@ class CrossDockPreprocessorTrainTestOnly:
             print("❌ Failed to load or create splits!")
             return
         
-        # CHỈ xử lý train và test
+        # Process train and test
         for split_name in ['train', 'test']:
             if split_name not in splits:
                 print(f"❌ Missing {split_name} split!")
@@ -346,12 +406,12 @@ class CrossDockPreprocessorTrainTestOnly:
             processed_data = []
             failed_count = 0
             
-            # Determine max samples for this split
+            # Determine max samples
             if self.max_samples:
                 if split_name == 'train':
                     max_for_split = min(self.max_samples, len(entries))
-                else:  # test
-                    max_for_split = min(self.max_samples // 4, len(entries))  # Test = 1/4 của train
+                else:
+                    max_for_split = min(self.max_samples // 4, len(entries))
                 print(f"⚠️  Limited to {max_for_split} samples for testing")
             else:
                 max_for_split = len(entries)
@@ -370,17 +430,51 @@ class CrossDockPreprocessorTrainTestOnly:
             
             # Save processed data
             if processed_data:
-                output_file = self.output_dir / f"{split_name}.pkl"
+                output_file = self.output_dir / f"{split_name}_generation.pkl"
                 with open(output_file, 'wb') as f:
                     pickle.dump(processed_data, f)
-                print(f"💾 Saved to {output_file}")
+                print(f"💾 Generation features saved to {output_file}")
+                
+                # Print feature summary
+                self._print_feature_summary(processed_data, split_name)
             else:
                 print(f"❌ No valid data for {split_name}")
         
-        print("\n🎉 Dataset preprocessing completed! (train/test only)")
+        print("\n🎉 Generation-focused preprocessing completed!")
+        print("📋 Feature Summary:")
+        print("   Ligand: 6 atom features + 3 bond features")
+        print("   Pocket: 7 Cα features + distance edges")
+        print("   Optimized for: SDE diffusion models")
+    
+    def _print_feature_summary(self, processed_data, split_name):
+        """Print feature summary"""
+        print(f"\n📊 {split_name.upper()} Feature Summary:")
+        
+        # Ligand statistics
+        ligand_atoms = [d['ligand']['num_atoms'] for d in processed_data if 'ligand' in d]
+        ligand_bonds = [d['ligand']['num_bonds'] for d in processed_data if 'ligand' in d]
+        
+        if ligand_atoms:
+            print(f"   Ligands: {len(ligand_atoms)} molecules")
+            print(f"     Atoms: {np.mean(ligand_atoms):.1f} ± {np.std(ligand_atoms):.1f} (avg ± std)")
+            print(f"     Range: {np.min(ligand_atoms)} - {np.max(ligand_atoms)} atoms")
+            print(f"     Bonds: {np.mean(ligand_bonds):.1f} ± {np.std(ligand_bonds):.1f} (avg ± std)")
+        
+        # Pocket statistics
+        pocket_residues = [d['pocket']['num_residues'] for d in processed_data if 'pocket' in d]
+        
+        if pocket_residues:
+            print(f"   Pockets: {len(pocket_residues)} pockets")
+            print(f"     Residues: {np.mean(pocket_residues):.1f} ± {np.std(pocket_residues):.1f} (avg ± std)")
+            print(f"     Range: {np.min(pocket_residues)} - {np.max(pocket_residues)} residues")
+        
+        print(f"   Feature dimensions:")
+        print(f"     Ligand atoms: [N, 6] features + [N, 3] positions")
+        print(f"     Ligand bonds: [E, 3] features")
+        print(f"     Pocket Cα: [M, 7] features + [M, 3] positions")
 
 def main():
-    parser = argparse.ArgumentParser(description='Preprocess CrossDock dataset (Train/Test only)')
+    parser = argparse.ArgumentParser(description='Generation-focused CrossDock preprocessing')
     parser.add_argument('--data_dir', type=str, default='data/crossdocked_pocket10',
                        help='Path to crossdocked_pocket10 data')
     parser.add_argument('--output_dir', type=str, default='data/processed',
@@ -398,11 +492,14 @@ def main():
     
     print(f"📁 Data directory: {args.data_dir}")
     print(f"📁 Output directory: {args.output_dir}")
-    print(f"🎯 Using train/test splits only (no validation)")
+    print("🎯 Generation-focused features:")
+    print("   - Minimal but essential atom/bond features")
+    print("   - Cα-only pocket representation")
+    print("   - Optimized for SDE diffusion models")
     if args.max_samples:
         print(f"⚠️  Max samples: {args.max_samples}")
     
-    preprocessor = CrossDockPreprocessorTrainTestOnly(
+    preprocessor = GenerationFocusedPreprocessor(
         data_dir=args.data_dir, 
         output_dir=args.output_dir,
         max_samples=args.max_samples

@@ -198,7 +198,7 @@ class Joint2D3DMolecularModel(MolecularModel):
             return pocket_repr
             
         except Exception as e:
-            print(f"Pocket encoding failed: {e}")
+            #print(f"Pocket encoding failed: {e}")
             batch_size = ligand_batch.max().item() + 1
             return torch.zeros(batch_size, self.pocket_dim, device=ligand_batch.device)
     

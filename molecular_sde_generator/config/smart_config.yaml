@@ -1,7 +1,7 @@
 # Smart config with intelligent pocket atom selection
 data:
   train_path: "data/processed/train.pkl"
-  val_path: "data/processed/val.pkl"
+  val_path: "data/processed/test.pkl"
   test_path: "data/processed/test.pkl"
   batch_size: 16
   num_workers: 4
@@ -14,10 +14,11 @@ data:
 model:
   atom_types: 11
   bond_types: 4
-  hidden_dim: 128
+  hidden_dim: 256
   pocket_dim: 256
   num_layers: 4
   max_radius: 10.0
+  conditioning_type: "concat"
   # Smart pocket selection parameters
   max_pocket_atoms: 1000
   pocket_selection_strategy: "adaptive"  # Options: adaptive, distance, surface, residue, binding_site
