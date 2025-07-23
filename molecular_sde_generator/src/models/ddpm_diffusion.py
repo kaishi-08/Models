@@ -1,4 +1,4 @@
-# src/models/ddpm_diffusion.py - Complete DDPM implementation
+# src/models/ddpm_diffusion.py - FIXED train() method conflict
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -166,7 +166,10 @@ class MolecularDDPM(nn.Module):
         return tensor.to(device)
 
 class MolecularDDPMModel(nn.Module):
-    """Wrapper for molecular model with DDPM time conditioning"""
+    """
+    FIXED: Wrapper for molecular model with DDPM time conditioning
+    Fixed train() method conflict with nn.Module.train()
+    """
     
     def __init__(self, base_model, ddpm: MolecularDDPM):
         super().__init__()
@@ -248,17 +251,14 @@ class MolecularDDPMModel(nn.Module):
         params.extend(list(self.time_embedding.parameters()))
         return iter(params)
     
-    def train(self):
-        """Set to training mode"""
-        self.base_model.train()
-        self.time_embedding.train()
-        return super().train()
+    # 🎯 FIXED: Remove custom train() method to avoid conflict
+    # PyTorch's nn.Module.train() will be used instead
     
     def eval(self):
-        """Set to evaluation mode"""
+        """Set to evaluation mode - FIXED"""
         self.base_model.eval()
         self.time_embedding.eval()
-        return super().eval()
+        return super().eval()  # Call parent eval() properly
     
     def state_dict(self):
         """Get state dictionary"""

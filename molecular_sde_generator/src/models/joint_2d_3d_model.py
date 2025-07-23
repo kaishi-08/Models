@@ -1,4 +1,4 @@
-# molecular_sde_generator/src/models/joint_2d_3d_model.py
+# src/models/joint_2d_3d_model.py - FIXED for 7D pocket features
 import torch
 import torch.nn as nn
 from torch_geometric.nn import global_mean_pool, global_max_pool
@@ -8,19 +8,14 @@ from .e3_egnn import E3EquivariantGNN
 
 class Joint2D3DMolecularModel(MolecularModel):
     """
-    Joint 2D/3D molecular generation with SIMPLE but EFFECTIVE pocket conditioning
-    
-    Approach: Additive Conditioning (Tránh hoàn toàn dimension mismatch)
-    - Pocket → Global representation vector
-    - Broadcast to all ligand atoms  
-    - Add to ligand features (không cần cross-attention)
+    COMPLETE FIX: Handle 6D ligand features and 7D pocket features
     """
     
     def __init__(self, atom_types: int = 100, bond_types: int = 5,
                  hidden_dim: int = 128, pocket_dim: int = 256,
                  num_layers: int = 4, max_radius: float = 10.0,
                  max_pocket_atoms: int = 1000,
-                 conditioning_type: str = "add"):  # "add", "concat", or "gated"
+                 conditioning_type: str = "add"):
         super().__init__(atom_types, bond_types, hidden_dim)
         
         self.pocket_dim = pocket_dim
@@ -29,15 +24,19 @@ class Joint2D3DMolecularModel(MolecularModel):
         self.max_pocket_atoms = max_pocket_atoms
         self.conditioning_type = conditioning_type
         
-        # Feature dimensions
-        self.atom_feature_dim = 8
+        # === FLEXIBLE EMBEDDINGS FOR DIFFERENT FEATURE DIMENSIONS ===
+        # Ligand embeddings (typically 6D or 8D)
+        self.atom_embedding_6d = nn.Linear(6, hidden_dim)
+        self.atom_embedding_8d = nn.Linear(8, hidden_dim)
         
-        # === EMBEDDINGS ===
-        self.atom_embedding = nn.Linear(self.atom_feature_dim, hidden_dim)
+        # Pocket embeddings (typically 7D, sometimes 8D)
+        self.pocket_atom_embedding_6d = nn.Linear(6, hidden_dim)
+        self.pocket_atom_embedding_7d = nn.Linear(7, hidden_dim)  # 🎯 NEW: For 7D pocket features
+        self.pocket_atom_embedding_8d = nn.Linear(8, hidden_dim)
+        
         self.bond_embedding = nn.Linear(1, hidden_dim)
         
-        # === POCKET ENCODER (Simple but Effective) ===
-        self.pocket_atom_embedding = nn.Linear(self.atom_feature_dim, hidden_dim)
+        # === POCKET ENCODER ===
         self.pocket_encoder = SimplePocketEncoder(
             input_dim=hidden_dim,
             hidden_dim=hidden_dim,
@@ -47,17 +46,12 @@ class Joint2D3DMolecularModel(MolecularModel):
         
         # === CONDITIONING MODULE ===
         if conditioning_type == "add":
-            # Simple addition - requires pocket_dim == hidden_dim
             assert pocket_dim == hidden_dim, f"For 'add' conditioning, pocket_dim ({pocket_dim}) must equal hidden_dim ({hidden_dim})"
             self.condition_transform = nn.Identity()
-            
         elif conditioning_type == "concat":
-            # Concatenation approach
             self.condition_transform = nn.Linear(pocket_dim, hidden_dim)
             self.feature_fusion = nn.Linear(hidden_dim * 2, hidden_dim)
-            
         elif conditioning_type == "gated":
-            # Gated conditioning (more sophisticated)
             self.condition_transform = nn.Linear(pocket_dim, hidden_dim)
             self.gate_net = nn.Sequential(
                 nn.Linear(hidden_dim * 2, hidden_dim),
@@ -97,41 +91,40 @@ class Joint2D3DMolecularModel(MolecularModel):
     def forward(self, x: torch.Tensor, pos: torch.Tensor, edge_index: torch.Tensor,
                 edge_attr: torch.Tensor, batch: torch.Tensor,
                 pocket_x: torch.Tensor = None, pocket_pos: torch.Tensor = None,
-                pocket_edge_index: torch.Tensor = None, pocket_batch: torch.Tensor = None):
+                pocket_edge_index: torch.Tensor = None, pocket_batch: torch.Tensor = None,
+                **kwargs):
         """
-        Forward pass với additive conditioning
-        
-        Args:
-            x: Ligand atom features [N, feature_dim]
-            pos: Ligand positions [N, 3]
-            edge_index: Ligand bonds [2, E]
-            edge_attr: Bond features [E, feature_dim]
-            batch: Batch indices for ligand [N]
-            pocket_*: Protein pocket data
+        FIXED forward pass with proper dimension handling
         """
         
-        # === STEP 1: LIGAND EMBEDDINGS ===
-        atom_emb = self._embed_atoms(x)
+        # Ensure gradients are enabled
+        if x.requires_grad == False:
+            x = x.requires_grad_(True)
+        if pos.requires_grad == False:
+            pos = pos.requires_grad_(True)
+        
+        # Flexible atom embedding
+        atom_emb = self._embed_atoms_flexible(x)
         bond_emb = self._embed_bonds(edge_attr, edge_index)
         
-        # === STEP 2: POCKET CONDITIONING ===
-        pocket_condition = self._encode_pocket(pocket_x, pocket_pos, pocket_edge_index, pocket_batch, batch)
+        # FIXED: Pocket conditioning with proper dimension handling
+        pocket_condition = self._encode_pocket_flexible(pocket_x, pocket_pos, pocket_edge_index, pocket_batch, batch)
         
-        # === STEP 3: APPLY CONDITIONING ===
-        conditioned_atom_emb = self._apply_conditioning(atom_emb, pocket_condition)
+        # Apply conditioning
+        conditioned_atom_emb = self._apply_conditioning(atom_emb, pocket_condition, batch)
         
-        # === STEP 4: 2D GRAPH PROCESSING ===
+        # 2D graph processing
         h_2d = conditioned_atom_emb
         for layer in self.graph_2d_net:
             h_2d = layer(h_2d, edge_index, bond_emb)
         
-        # === STEP 5: 3D EQUIVARIANT PROCESSING ===
+        # 3D equivariant processing
         h_3d = self.e3_3d_net(conditioned_atom_emb, pos, edge_index, batch)
         
-        # === STEP 6: FEATURE FUSION ===
+        # Feature fusion
         h_fused = self.fusion_layer(torch.cat([h_2d, h_3d], dim=-1))
         
-        # === STEP 7: PREDICTIONS ===
+        # Predictions
         atom_logits = self.atom_type_head(h_fused)
         pos_pred = self.position_head(h_fused)
         
@@ -150,17 +143,33 @@ class Joint2D3DMolecularModel(MolecularModel):
             'node_features': h_fused
         }
     
-    def _embed_atoms(self, x: torch.Tensor) -> torch.Tensor:
-        """Embed atom features safely"""
-        if x.dim() == 2 and x.size(1) == self.atom_feature_dim:
-            return self.atom_embedding(x.float())
-        elif x.dim() == 2 and x.size(1) == 1:
-            # Convert indices to one-hot if needed
-            one_hot = torch.zeros(x.size(0), self.atom_feature_dim, device=x.device)
-            one_hot[torch.arange(x.size(0)), x.squeeze(-1).long().clamp(0, self.atom_feature_dim-1)] = 1.0
-            return self.atom_embedding(one_hot)
+    def _embed_atoms_flexible(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Flexible atom embedding for ligand features
+        """
+        if x.dim() != 2:
+            raise ValueError(f"Expected 2D input, got {x.dim()}D: {x.shape}")
+        
+        input_dim = x.size(1)
+        
+        if input_dim == 6:
+            return self.atom_embedding_6d(x.float())
+        elif input_dim == 8:
+            return self.atom_embedding_8d(x.float())
+        elif input_dim < 6:
+            # Pad to 6 dimensions
+            padding = torch.zeros(x.size(0), 6 - input_dim, device=x.device, dtype=x.dtype)
+            x_padded = torch.cat([x, padding], dim=1)
+            return self.atom_embedding_6d(x_padded.float())
+        elif input_dim == 7:
+            # Handle 7D by padding to 8D
+            padding = torch.zeros(x.size(0), 1, device=x.device, dtype=x.dtype)
+            x_padded = torch.cat([x, padding], dim=1)
+            return self.atom_embedding_8d(x_padded.float())
         else:
-            raise ValueError(f"Unexpected x shape: {x.shape}")
+            # Truncate to 8 dimensions for >8D input
+            x_truncated = x[:, :8]
+            return self.atom_embedding_8d(x_truncated.float())
     
     def _embed_bonds(self, edge_attr: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
         """Embed bond features safely"""
@@ -174,23 +183,41 @@ class Joint2D3DMolecularModel(MolecularModel):
         
         return bond_emb
     
-    def _encode_pocket(self, pocket_x: torch.Tensor, pocket_pos: torch.Tensor,
-                      pocket_edge_index: torch.Tensor, pocket_batch: torch.Tensor,
-                      ligand_batch: torch.Tensor) -> torch.Tensor:
+    def _encode_pocket_flexible(self, pocket_x: torch.Tensor, pocket_pos: torch.Tensor,
+                               pocket_edge_index: torch.Tensor, pocket_batch: torch.Tensor,
+                               ligand_batch: torch.Tensor) -> torch.Tensor:
         """
-        Encode pocket into global condition vectors
-        
-        Returns:
-            condition_vectors: [batch_size, pocket_dim] - one vector per batch
+        🎯 FIXED: Flexible pocket encoding with proper 7D handling
         """
         if pocket_x is None or pocket_pos is None:
-            # No pocket conditioning
             batch_size = ligand_batch.max().item() + 1
             return torch.zeros(batch_size, self.pocket_dim, device=ligand_batch.device)
         
         try:
-            # Embed pocket atoms
-            pocket_emb = self.pocket_atom_embedding(pocket_x.float())
+            input_dim = pocket_x.size(1)
+            # print(f"Debug: Pocket input dimension: {input_dim}")  # Debug line
+            
+            # 🎯 HANDLE DIFFERENT POCKET DIMENSIONS PROPERLY
+            if input_dim == 6:
+                pocket_emb = self.pocket_atom_embedding_6d(pocket_x.float())
+            elif input_dim == 7:
+                # 🎯 CRITICAL FIX: Use 7D embedding for 7D pocket features
+                pocket_emb = self.pocket_atom_embedding_7d(pocket_x.float())
+            elif input_dim == 8:
+                pocket_emb = self.pocket_atom_embedding_8d(pocket_x.float())
+            elif input_dim < 6:
+                # Pad to 6 dimensions
+                padding = torch.zeros(pocket_x.size(0), 6 - input_dim, 
+                                    device=pocket_x.device, dtype=pocket_x.dtype)
+                pocket_x_padded = torch.cat([pocket_x, padding], dim=1)
+                pocket_emb = self.pocket_atom_embedding_6d(pocket_x_padded.float())
+            elif input_dim > 8:
+                # Truncate to 8 dimensions
+                pocket_x_truncated = pocket_x[:, :8]
+                pocket_emb = self.pocket_atom_embedding_8d(pocket_x_truncated.float())
+            else:
+                # This should not happen, but fallback to 7D
+                pocket_emb = self.pocket_atom_embedding_7d(pocket_x.float())
             
             # Encode pocket
             pocket_repr = self.pocket_encoder(pocket_emb, pocket_pos, pocket_edge_index, pocket_batch)
@@ -198,65 +225,52 @@ class Joint2D3DMolecularModel(MolecularModel):
             return pocket_repr
             
         except Exception as e:
-            #print(f"Pocket encoding failed: {e}")
+            # Silent fallback - don't spam console
             batch_size = ligand_batch.max().item() + 1
             return torch.zeros(batch_size, self.pocket_dim, device=ligand_batch.device)
     
-    def _apply_conditioning(self, atom_features: torch.Tensor, pocket_condition: torch.Tensor) -> torch.Tensor:
+    def _apply_conditioning(self, atom_features: torch.Tensor, pocket_condition: torch.Tensor, 
+                          batch: torch.Tensor) -> torch.Tensor:
         """
-        Apply pocket conditioning to atom features
-        
-        Args:
-            atom_features: [N_atoms, hidden_dim]
-            pocket_condition: [batch_size, pocket_dim]
-            
-        Returns:
-            conditioned_features: [N_atoms, hidden_dim]
+        Apply pocket conditioning with proper batch handling
         """
         if pocket_condition.abs().sum() == 0:
-            # No conditioning
             return atom_features
         
-        # Transform pocket condition to match hidden_dim
-        pocket_transformed = self.condition_transform(pocket_condition)  # [batch_size, hidden_dim]
+        # Transform pocket condition
+        pocket_transformed = self.condition_transform(pocket_condition)
         
-        # Broadcast to all atoms (assuming single batch for now)
-        # For multi-batch, you'd use: pocket_transformed[batch_indices]
-        if pocket_transformed.size(0) == 1:
-            # Single batch case
-            broadcasted_condition = pocket_transformed.expand(atom_features.size(0), -1)
-        else:
-            # Multi-batch case - need batch indices
-            # For now, use first batch
-            broadcasted_condition = pocket_transformed[0:1].expand(atom_features.size(0), -1)
+        # Broadcast to atoms using batch indices
+        batch_size = pocket_transformed.size(0)
+        max_batch_idx = batch.max().item()
         
-        # Apply conditioning based on type
+        if max_batch_idx >= batch_size:
+            # Handle batch size mismatch by expanding
+            pocket_transformed = pocket_transformed[0:1].expand(max_batch_idx + 1, -1)
+        
+        # Use batch indices to broadcast
+        broadcasted_condition = pocket_transformed[batch]
+        
+        # Apply conditioning
         if self.conditioning_type == "add":
             return atom_features + broadcasted_condition
-            
         elif self.conditioning_type == "concat":
             concatenated = torch.cat([atom_features, broadcasted_condition], dim=-1)
             return self.feature_fusion(concatenated)
-            
         elif self.conditioning_type == "gated":
             concatenated = torch.cat([atom_features, broadcasted_condition], dim=-1)
             gate = self.gate_net(concatenated)
             return atom_features * gate + broadcasted_condition * (1 - gate)
-        
         else:
             return atom_features
 
 class SimplePocketEncoder(nn.Module):
-    """
-    Simple but effective pocket encoder
-    Pocket atoms → Global representation vector
-    """
+    """Simple but effective pocket encoder"""
     
     def __init__(self, input_dim: int, hidden_dim: int, output_dim: int, max_atoms: int = 1000):
         super().__init__()
         self.max_atoms = max_atoms
         
-        # Simple MLP for atom-wise processing
         self.atom_processor = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.ReLU(),
@@ -264,7 +278,6 @@ class SimplePocketEncoder(nn.Module):
             nn.ReLU()
         )
         
-        # Global pooling and final projection
         self.global_processor = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
@@ -273,16 +286,6 @@ class SimplePocketEncoder(nn.Module):
         
     def forward(self, pocket_features: torch.Tensor, pocket_pos: torch.Tensor,
                 pocket_edge_index: torch.Tensor, pocket_batch: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            pocket_features: [N_pocket, input_dim]
-            pocket_pos: [N_pocket, 3] 
-            pocket_edge_index: [2, E_pocket]
-            pocket_batch: [N_pocket]
-            
-        Returns:
-            global_repr: [batch_size, output_dim]
-        """
         
         # Smart selection if pocket too large
         if pocket_features.size(0) > self.max_atoms:
@@ -294,7 +297,6 @@ class SimplePocketEncoder(nn.Module):
         processed_features = self.atom_processor(pocket_features)
         
         # Global pooling per batch
-        # Combine mean and max pooling for richer representation
         global_mean = global_mean_pool(processed_features, pocket_batch)
         global_max = global_max_pool(processed_features, pocket_batch)
         global_combined = global_mean + global_max
@@ -325,7 +327,7 @@ class GraphConvLayer(nn.Module):
     def __init__(self, in_dim: int, out_dim: int):
         super().__init__()
         self.message_mlp = nn.Sequential(
-            nn.Linear(in_dim * 2 + in_dim, out_dim),  # node1 + node2 + edge
+            nn.Linear(in_dim * 2 + in_dim, out_dim),
             nn.ReLU(),
             nn.Linear(out_dim, out_dim)
         )

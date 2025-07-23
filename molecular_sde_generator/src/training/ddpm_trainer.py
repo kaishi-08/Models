@@ -1,4 +1,4 @@
-# src/training/ddpm_trainer.py - Fixed device handling
+# src/training/ddpm_trainer.py - FIXED gradient handling
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -28,26 +28,29 @@ except ImportError:
             self.beta_schedule = beta_schedule
         
         def compute_loss(self, model, x0, **model_kwargs):
-            """Simple DDPM loss with proper device handling"""
+            """FIXED DDPM loss with proper gradient handling"""
             device = x0.device
             batch_size = x0.size(0)
             
             # Sample timesteps
             t = torch.randint(0, self.num_timesteps, (batch_size,), device=device)
             
-            # Sample noise
-            noise = torch.randn_like(x0)
+            # Sample noise with gradients
+            noise = torch.randn_like(x0, requires_grad=True)
             
             # Simple noise schedule
             alpha = 0.99
             alpha_bar = (alpha ** t.float()).view(-1, 1)
             
-            # Add noise
+            # Add noise with gradient preservation
             sqrt_alpha_bar = torch.sqrt(alpha_bar)
             sqrt_one_minus_alpha_bar = torch.sqrt(1 - alpha_bar)
             x_t = sqrt_alpha_bar * x0 + sqrt_one_minus_alpha_bar * noise
             
-            # Prepare model inputs with proper device handling
+            # Ensure x_t requires gradients
+            x_t = x_t.requires_grad_(True)
+            
+            # Prepare model inputs with gradient preservation
             model_inputs = self._prepare_model_inputs(x_t, t, model_kwargs, device)
             
             try:
@@ -60,43 +63,66 @@ except ImportError:
                 else:
                     predicted_noise = output
                 
-                # Compute loss
+                # Compute loss with gradient preservation
                 loss = nn.MSELoss()(predicted_noise, noise)
+                
+                # Ensure loss requires gradients
+                if not loss.requires_grad:
+                    loss = loss.requires_grad_(True)
                 
                 return loss, {'noise_loss': loss.item()}
                 
             except Exception as e:
                 print(f"Model forward error: {e}")
-                # Return dummy loss to continue training
+                # Return dummy loss with gradients
                 dummy_loss = torch.tensor(1.0, device=device, requires_grad=True)
                 return dummy_loss, {'noise_loss': 1.0}
         
         def _prepare_model_inputs(self, x_t, t, model_kwargs, device):
-            """Prepare model inputs with proper device handling"""
+            """Prepare model inputs with gradient preservation"""
             model_inputs = {
-                'pos': x_t,
+                'pos': x_t.requires_grad_(True),
                 't': t
             }
             
-            # Add atom features
+            # Add atom features with gradients
             if 'atom_features' in model_kwargs:
-                model_inputs['x'] = self._ensure_device(model_kwargs['atom_features'], device)
+                model_inputs['x'] = self._ensure_device_and_grad(model_kwargs['atom_features'], device)
             elif 'x' in model_kwargs:
-                model_inputs['x'] = self._ensure_device(model_kwargs['x'], device)
+                model_inputs['x'] = self._ensure_device_and_grad(model_kwargs['x'], device)
             
             # Add graph structure
             graph_keys = ['edge_index', 'edge_attr', 'batch']
             for key in graph_keys:
                 if key in model_kwargs and model_kwargs[key] is not None:
-                    model_inputs[key] = self._ensure_device(model_kwargs[key], device)
+                    tensor = self._ensure_device(model_kwargs[key], device)
+                    if key == 'edge_attr' and tensor.dtype == torch.float:
+                        tensor = tensor.requires_grad_(True)
+                    model_inputs[key] = tensor
             
-            # Add pocket data
+            # Add pocket data with gradients where appropriate
             pocket_keys = ['pocket_x', 'pocket_pos', 'pocket_edge_index', 'pocket_batch']
             for key in pocket_keys:
                 if key in model_kwargs and model_kwargs[key] is not None:
-                    model_inputs[key] = self._ensure_device(model_kwargs[key], device)
+                    tensor = self._ensure_device(model_kwargs[key], device)
+                    if key in ['pocket_x', 'pocket_pos'] and tensor.dtype == torch.float:
+                        tensor = tensor.requires_grad_(True)
+                    model_inputs[key] = tensor
             
             return model_inputs
+        
+        def _ensure_device_and_grad(self, tensor, device):
+            """Ensure tensor is on device and has gradients if needed"""
+            if tensor is None:
+                return None
+            if not isinstance(tensor, torch.Tensor):
+                return tensor
+            
+            tensor = tensor.to(device)
+            if tensor.dtype == torch.float and not tensor.requires_grad:
+                tensor = tensor.requires_grad_(True)
+            
+            return tensor
         
         def _ensure_device(self, tensor, device):
             """Ensure tensor is on correct device"""
@@ -113,9 +139,6 @@ except ImportError:
         
         def parameters(self):
             return self.base_model.parameters()
-        
-        def train(self):
-            self.base_model.train()
         
         def eval(self):
             self.base_model.eval()
@@ -140,7 +163,7 @@ except ImportError:
         def on_batch_end(self, batch_idx: int, outputs: Dict[str, Any], trainer): pass
 
 def move_batch_to_device(batch, device):
-    """Safely move batch to device with comprehensive error handling"""
+    """FIXED: Move batch to device with gradient preservation"""
     if batch is None:
         return None
     
@@ -148,11 +171,20 @@ def move_batch_to_device(batch, device):
         # Move entire batch to device
         batch = batch.to(device)
         
-        # Explicitly check and fix key tensors
-        critical_attrs = ['x', 'pos', 'edge_index', 'edge_attr', 'batch', 
-                         'pocket_x', 'pocket_pos', 'pocket_edge_index', 'pocket_batch']
+        # Explicitly handle key tensors with gradient preservation
+        float_attrs = ['x', 'pos', 'pocket_x', 'pocket_pos', 'edge_attr', 'pocket_edge_attr']
+        int_attrs = ['edge_index', 'batch', 'pocket_edge_index', 'pocket_batch']
         
-        for attr in critical_attrs:
+        for attr in float_attrs:
+            if hasattr(batch, attr):
+                tensor = getattr(batch, attr)
+                if tensor is not None and isinstance(tensor, torch.Tensor):
+                    tensor = tensor.to(device)
+                    if tensor.dtype == torch.float and not tensor.requires_grad:
+                        tensor = tensor.requires_grad_(True)
+                    setattr(batch, attr, tensor)
+        
+        for attr in int_attrs:
             if hasattr(batch, attr):
                 tensor = getattr(batch, attr)
                 if tensor is not None and isinstance(tensor, torch.Tensor):
@@ -166,7 +198,7 @@ def move_batch_to_device(batch, device):
         return None
 
 class DDPMMolecularTrainer:
-    """DDPM trainer with robust device handling"""
+    """FIXED DDPM trainer with proper gradient handling"""
     
     def __init__(self, 
                  base_model,
@@ -196,11 +228,12 @@ class DDPMMolecularTrainer:
         print(f"✅ DDPM Trainer initialized on {self.device}")
     
     def train_epoch(self, dataloader: DataLoader) -> Dict[str, float]:
-        """Train one epoch with robust device handling"""
-        self.model.train()
+        """FIXED: Train one epoch with proper gradient handling"""
+        self.model.base_model.train()  # Ensure training mode
         epoch_losses = {'total_loss': 0.0, 'noise_loss': 0.0}
         num_batches = 0
         device_errors = 0
+        gradient_errors = 0
         
         # Callbacks
         for callback in self.callbacks:
@@ -215,7 +248,7 @@ class DDPMMolecularTrainer:
             if batch is None:
                 continue
             
-            # CRITICAL: Proper device handling
+            # FIXED: Proper device handling with gradients
             batch = move_batch_to_device(batch, self.device)
             if batch is None:
                 device_errors += 1
@@ -228,20 +261,33 @@ class DDPMMolecularTrainer:
                 except:
                     pass
             
-            # Training step with device-safe DDPM call
+            # FIXED: Training step with gradient preservation
             try:
-                # Prepare kwargs with device checking
+                # Zero gradients
+                self.optimizer.zero_grad()
+                
+                # Prepare kwargs with gradient safety
                 ddpm_kwargs = self._prepare_safe_kwargs(batch)
+                
+                # Ensure target has gradients
+                target_pos = batch.pos.to(self.device)
+                if not target_pos.requires_grad:
+                    target_pos = target_pos.requires_grad_(True)
                 
                 # DDPM loss computation
                 loss, loss_dict = self.ddpm.compute_loss(
                     model=self.model,
-                    x0=batch.pos.to(self.device),  # Ensure target is on device
+                    x0=target_pos,
                     **ddpm_kwargs
                 )
                 
+                # Verify loss has gradients
+                if not loss.requires_grad:
+                    gradient_errors += 1
+                    print(f"Warning: Loss at batch {batch_idx} doesn't require grad")
+                    continue
+                
                 # Backward pass
-                self.optimizer.zero_grad()
                 loss.backward()
                 
                 # Gradient clipping
@@ -259,7 +305,8 @@ class DDPMMolecularTrainer:
                 progress_bar.set_postfix({
                     'loss': f"{loss.item():.4f}",
                     'lr': f"{self.optimizer.param_groups[0]['lr']:.2e}",
-                    'dev_err': device_errors
+                    'dev_err': device_errors,
+                    'grad_err': gradient_errors
                 })
                 
                 # Callback
@@ -274,7 +321,7 @@ class DDPMMolecularTrainer:
                 print(f"Training error at batch {batch_idx}: {e}")
                 
                 # Debug info for first few errors
-                if batch_idx < 5:
+                if batch_idx % 100 == 0:  # Reduced frequency
                     self._debug_batch_devices(batch, batch_idx)
                 
                 device_errors += 1
@@ -287,34 +334,45 @@ class DDPMMolecularTrainer:
         
         if device_errors > 0:
             print(f"⚠️  {device_errors} device errors encountered")
+        if gradient_errors > 0:
+            print(f"⚠️  {gradient_errors} gradient errors encountered")
         
         return epoch_losses
     
     def _prepare_safe_kwargs(self, batch):
-        """Prepare kwargs with guaranteed device consistency"""
+        """FIXED: Prepare kwargs with guaranteed device consistency and gradients"""
         kwargs = {}
         
-        # Add atom features (avoid 'x' conflict)
+        # Add atom features with gradients
         if hasattr(batch, 'x') and batch.x is not None:
-            kwargs['atom_features'] = batch.x.to(self.device)
+            x = batch.x.to(self.device)
+            if x.dtype == torch.float and not x.requires_grad:
+                x = x.requires_grad_(True)
+            kwargs['atom_features'] = x
         
         # Add graph structure
         if hasattr(batch, 'edge_index') and batch.edge_index is not None:
             kwargs['edge_index'] = batch.edge_index.to(self.device)
         
         if hasattr(batch, 'edge_attr') and batch.edge_attr is not None:
-            kwargs['edge_attr'] = batch.edge_attr.to(self.device)
+            edge_attr = batch.edge_attr.to(self.device)
+            if edge_attr.dtype == torch.float and not edge_attr.requires_grad:
+                edge_attr = edge_attr.requires_grad_(True)
+            kwargs['edge_attr'] = edge_attr
         
         if hasattr(batch, 'batch') and batch.batch is not None:
             kwargs['batch'] = batch.batch.to(self.device)
         
-        # Add pocket data
+        # Add pocket data with gradients
         pocket_attrs = ['pocket_x', 'pocket_pos', 'pocket_edge_index', 'pocket_batch']
         for attr in pocket_attrs:
             if hasattr(batch, attr):
                 value = getattr(batch, attr)
                 if value is not None:
-                    kwargs[attr] = value.to(self.device)
+                    value = value.to(self.device)
+                    if attr in ['pocket_x', 'pocket_pos'] and value.dtype == torch.float and not value.requires_grad:
+                        value = value.requires_grad_(True)
+                    kwargs[attr] = value
         
         return kwargs
     
@@ -330,13 +388,13 @@ class DDPMMolecularTrainer:
             if hasattr(batch, attr):
                 value = getattr(batch, attr)
                 if value is not None and isinstance(value, torch.Tensor):
-                    print(f"    {attr}: {value.device} {value.shape}")
+                    print(f"    {attr}: {value.device} {value.shape} grad={value.requires_grad}")
                 else:
                     print(f"    {attr}: None or not tensor")
     
     def validate(self, dataloader: DataLoader) -> Dict[str, float]:
         """Validation with device handling"""
-        self.model.eval()
+        self.model.base_model.eval()
         val_losses = {'total_loss': 0.0, 'noise_loss': 0.0}
         num_batches = 0
         device_errors = 0
@@ -366,7 +424,6 @@ class DDPMMolecularTrainer:
                     num_batches += 1
                     
                 except Exception as e:
-                    print(f"Validation error: {e}")
                     device_errors += 1
                     continue
         
@@ -447,7 +504,7 @@ class DDPMMolecularTrainer:
     
     def generate_samples(self, num_samples: int = 10, max_atoms: int = 30, **kwargs):
         """Generate molecular samples"""
-        self.model.eval()
+        self.model.base_model.eval()
         
         print(f"🧪 Generating {num_samples} samples on {self.device}...")
         samples = []

@@ -1,19 +1,15 @@
-# src/data/data_loaders.py - Complete fix with pocket_batch
+# src/data/data_loaders.py - CLEAN VERSION (no debug messages)
 import torch
 from torch.utils.data import DataLoader
-from torch_geometric.loader import DataLoader as GeometricDataLoader
 from torch_geometric.data import Data, Batch
 from .molecular_dataset import CrossDockMolecularDataset
 from .pocket_dataset import ProteinPocketDataset
 from typing import Optional, Dict, Any
 
-def safe_collate_crossdock_data(batch, max_pocket_atoms_per_mol: int = 500):
+def safe_collate_crossdock_data(batch, max_pocket_atoms_per_mol: int = 200):
     """
-    Comprehensive collate function with proper pocket_batch creation
-    
-    This function fixes the missing pocket_batch issue that was causing training errors
+    Clean collate function without debug messages
     """
-    
     if not batch or len(batch) == 0:
         return None
     
@@ -30,55 +26,64 @@ def safe_collate_crossdock_data(batch, max_pocket_atoms_per_mol: int = 500):
         # Add molecular data to list
         mol_data_list.append(data)
         
-        # Handle pocket data with size limits and proper batch indexing
+        # Handle pocket data with guaranteed pocket_batch creation
         if hasattr(data, 'pocket_x') and data.pocket_x is not None:
             pocket_x = data.pocket_x
             pocket_pos = data.pocket_pos
             pocket_edge_index = getattr(data, 'pocket_edge_index', None)
             pocket_edge_attr = getattr(data, 'pocket_edge_attr', None)
             
-            # CRITICAL: Limit pocket size to prevent memory issues
+            # Smart pocket atom selection
             if pocket_x.size(0) > max_pocket_atoms_per_mol:
-                # Randomly sample atoms to stay within limit
-                indices = torch.randperm(pocket_x.size(0))[:max_pocket_atoms_per_mol]
+                # Distance-based selection if ligand available
+                if hasattr(data, 'pos') and data.pos is not None:
+                    ligand_center = data.pos.mean(dim=0)
+                    distances = torch.norm(pocket_pos - ligand_center, dim=1)
+                    _, indices = torch.topk(distances, k=max_pocket_atoms_per_mol, largest=False)
+                else:
+                    indices = torch.randperm(pocket_x.size(0))[:max_pocket_atoms_per_mol]
+                
+                # Apply selection
                 pocket_x = pocket_x[indices]
                 pocket_pos = pocket_pos[indices]
                 
-                # Update edge indices if present
-                if pocket_edge_index is not None:
-                    # Create mapping from old to new indices
+                # Update edges efficiently
+                if pocket_edge_index is not None and pocket_edge_index.size(1) > 0:
+                    # Create mapping
                     old_to_new = {old_idx.item(): new_idx for new_idx, old_idx in enumerate(indices)}
                     
-                    # Filter edges that reference kept atoms
-                    mask = torch.zeros(pocket_edge_index.size(1), dtype=torch.bool)
-                    new_edge_index = []
+                    # Filter edges
+                    new_edges = []
+                    new_edge_attrs = []
                     
                     for i in range(pocket_edge_index.size(1)):
                         src, dst = pocket_edge_index[0, i].item(), pocket_edge_index[1, i].item()
                         if src in old_to_new and dst in old_to_new:
-                            new_edge_index.append([old_to_new[src], old_to_new[dst]])
-                            mask[i] = True
+                            new_edges.append([old_to_new[src], old_to_new[dst]])
+                            if pocket_edge_attr is not None:
+                                new_edge_attrs.append(pocket_edge_attr[i])
                     
-                    if new_edge_index:
-                        pocket_edge_index = torch.tensor(new_edge_index, dtype=torch.long).t()
+                    if new_edges:
+                        pocket_edge_index = torch.tensor(new_edges, dtype=torch.long).t()
+                        if new_edge_attrs:
+                            pocket_edge_attr = torch.stack(new_edge_attrs)
                     else:
                         pocket_edge_index = torch.zeros((2, 0), dtype=torch.long)
-                    
-                    if pocket_edge_attr is not None:
-                        pocket_edge_attr = pocket_edge_attr[mask]
+                        pocket_edge_attr = torch.zeros((0, 1), dtype=torch.float) if pocket_edge_attr is not None else None
             
-            # CRITICAL FIX: Create proper pocket batch indices
-            # Each pocket atom gets the molecule index it belongs to
-            pocket_batch_indices = torch.full((pocket_x.size(0),), mol_idx, dtype=torch.long)
+            # Create pocket_batch_indices (CRITICAL FIX)
+            num_pocket_atoms = pocket_x.size(0)
+            pocket_batch_indices = torch.full((num_pocket_atoms,), mol_idx, dtype=torch.long)
             
-            # Create pocket data with all required attributes
+            # Create pocket data object
             pocket_data = Data(
                 x=pocket_x,
                 pos=pocket_pos,
                 edge_index=pocket_edge_index if pocket_edge_index is not None else torch.zeros((2, 0), dtype=torch.long),
                 edge_attr=pocket_edge_attr if pocket_edge_attr is not None else torch.zeros((0, 1), dtype=torch.float),
-                batch=pocket_batch_indices  # THIS WAS MISSING - CRITICAL FIX!
+                batch=pocket_batch_indices
             )
+            
             pocket_data_list.append(pocket_data)
     
     try:
@@ -89,22 +94,21 @@ def safe_collate_crossdock_data(batch, max_pocket_atoms_per_mol: int = 500):
         if pocket_data_list:
             pocket_batch = Batch.from_data_list(pocket_data_list)
             
-            # Add pocket data to molecular batch with proper attributes
+            # Add pocket attributes to molecular batch
             mol_batch.pocket_x = pocket_batch.x
             mol_batch.pocket_pos = pocket_batch.pos
             mol_batch.pocket_edge_index = pocket_batch.edge_index
             mol_batch.pocket_edge_attr = pocket_batch.edge_attr
-            mol_batch.pocket_batch = pocket_batch.batch  # CRITICAL: This ensures pocket_batch is present!
+            mol_batch.pocket_batch = pocket_batch.batch  # GUARANTEED POCKET_BATCH!
             
-            # Validation: ensure pocket batch indices are valid
+            # Validation
             max_mol_batch = mol_batch.batch.max().item()
             max_pocket_batch = mol_batch.pocket_batch.max().item()
             
             if max_pocket_batch > max_mol_batch:
-                print(f"Warning: Fixing pocket batch indices: {max_pocket_batch} -> {max_mol_batch}")
                 mol_batch.pocket_batch = torch.clamp(mol_batch.pocket_batch, 0, max_mol_batch)
         else:
-            # No pocket data - add None attributes to avoid AttributeError
+            # Set None attributes explicitly
             mol_batch.pocket_x = None
             mol_batch.pocket_pos = None
             mol_batch.pocket_edge_index = None
@@ -114,30 +118,23 @@ def safe_collate_crossdock_data(batch, max_pocket_atoms_per_mol: int = 500):
         return mol_batch
         
     except Exception as e:
-        print(f"Collation error: {e}")
-        import traceback
-        traceback.print_exc()
-        
-        # Fallback: return simple molecular batch without pocket
+        # Silent fallback
         try:
             mol_batch = Batch.from_data_list(mol_data_list)
-            # Add None pocket attributes to prevent AttributeError
-            mol_batch.pocket_x = None
-            mol_batch.pocket_pos = None
-            mol_batch.pocket_edge_index = None
-            mol_batch.pocket_edge_attr = None
-            mol_batch.pocket_batch = None
+            # Set None pocket attributes
+            for attr in ['pocket_x', 'pocket_pos', 'pocket_edge_index', 'pocket_edge_attr', 'pocket_batch']:
+                setattr(mol_batch, attr, None)
             return mol_batch
         except Exception as e2:
-            print(f"Even fallback collation failed: {e2}")
             return None
 
 class CrossDockDataLoader:
-    """Factory class for creating CrossDock data loaders with proper pocket handling"""
+    """Clean DataLoader factory without debug messages"""
     
     @staticmethod
     def create_train_loader(config: Dict[str, Any]) -> DataLoader:
-        """Create training data loader with fixed collation"""
+        """Create training loader"""
+        
         dataset = CrossDockMolecularDataset(
             data_path=config['data']['train_path'],
             include_pocket=config.get('include_pocket', True),
@@ -145,20 +142,21 @@ class CrossDockDataLoader:
             augment=config.get('augment', True)
         )
         
-        return GeometricDataLoader(
+        return DataLoader(
             dataset,
             batch_size=config['data']['batch_size'],
             shuffle=config['data'].get('shuffle', True),
-            num_workers=config['data'].get('num_workers', 4),
-            pin_memory=config['data'].get('pin_memory', False),  # Disabled for stability
+            num_workers=config['data'].get('num_workers', 4),  # Restored to 4
+            pin_memory=config['data'].get('pin_memory', True),  # Restored pin_memory
             collate_fn=safe_collate_crossdock_data,
             drop_last=True,
-            persistent_workers=False  # Disabled for stability
+            persistent_workers=config['data'].get('num_workers', 4) > 0  # Enable if workers > 0
         )
     
     @staticmethod
     def create_val_loader(config: Dict[str, Any]) -> DataLoader:
-        """Create validation data loader"""
+        """Create validation loader"""
+        
         val_path = config['data'].get('val_path', config['data']['test_path'])
         
         dataset = CrossDockMolecularDataset(
@@ -168,20 +166,21 @@ class CrossDockDataLoader:
             augment=False
         )
         
-        return GeometricDataLoader(
+        return DataLoader(
             dataset,
             batch_size=config['data']['batch_size'],
             shuffle=False,
             num_workers=config['data'].get('num_workers', 4),
-            pin_memory=config['data'].get('pin_memory', False),
+            pin_memory=config['data'].get('pin_memory', True),
             collate_fn=safe_collate_crossdock_data,
             drop_last=False,
-            persistent_workers=False
+            persistent_workers=config['data'].get('num_workers', 4) > 0
         )
     
     @staticmethod
     def create_test_loader(config: Dict[str, Any]) -> DataLoader:
-        """Create test data loader"""
+        """Create test loader"""
+        
         dataset = CrossDockMolecularDataset(
             data_path=config['data']['test_path'],
             include_pocket=config.get('include_pocket', True),
@@ -189,71 +188,24 @@ class CrossDockDataLoader:
             augment=False
         )
         
-        return GeometricDataLoader(
+        return DataLoader(
             dataset,
             batch_size=config['data']['batch_size'],
             shuffle=False,
             num_workers=config['data'].get('num_workers', 4),
-            pin_memory=config['data'].get('pin_memory', False),
+            pin_memory=config['data'].get('pin_memory', True),
             collate_fn=safe_collate_crossdock_data,
             drop_last=False,
-            persistent_workers=False
+            persistent_workers=config['data'].get('num_workers', 4) > 0
         )
-    
-    @staticmethod
-    def create_train_val_split_loader(config: Dict[str, Any], val_ratio: float = 0.1):
-        """Create train/val loaders by splitting train data"""
-        from torch.utils.data import random_split
-        
-        full_dataset = CrossDockMolecularDataset(
-            data_path=config['data']['train_path'],
-            include_pocket=config.get('include_pocket', True),
-            max_atoms=config.get('max_atoms', 50),
-            augment=False
-        )
-        
-        # Split dataset
-        total_size = len(full_dataset)
-        val_size = int(total_size * val_ratio)
-        train_size = total_size - val_size
-        
-        train_dataset, val_dataset = random_split(
-            full_dataset, [train_size, val_size],
-            generator=torch.Generator().manual_seed(42)
-        )
-        
-        # Create loaders
-        train_loader = GeometricDataLoader(
-            train_dataset,
-            batch_size=config['data']['batch_size'],
-            shuffle=True,
-            num_workers=config['data'].get('num_workers', 4),
-            pin_memory=config['data'].get('pin_memory', False),
-            collate_fn=safe_collate_crossdock_data,
-            drop_last=True,
-            persistent_workers=False
-        )
-        
-        val_loader = GeometricDataLoader(
-            val_dataset,
-            batch_size=config['data']['batch_size'],
-            shuffle=False,
-            num_workers=config['data'].get('num_workers', 4),
-            pin_memory=config['data'].get('pin_memory', False),
-            collate_fn=safe_collate_crossdock_data,
-            drop_last=False,
-            persistent_workers=False
-        )
-        
-        return train_loader, val_loader
 
-# Legacy classes for backward compatibility
+# Backward compatibility
 class MolecularDataLoader(CrossDockDataLoader):
-    """Factory class for creating molecular data loaders (backward compatibility)"""
+    """Molecular data loader (backward compatibility)"""
     pass
 
 class PocketDataLoader:
-    """Factory class for creating protein pocket data loaders"""
+    """Pocket data loader"""
     
     @staticmethod
     def create_loader(data_path: str, config: Dict[str, Any]) -> DataLoader:
@@ -264,11 +216,11 @@ class PocketDataLoader:
             include_surface=config.get('include_surface', True)
         )
         
-        return GeometricDataLoader(
+        return DataLoader(
             dataset,
             batch_size=config.get('batch_size', 16),
             shuffle=config.get('shuffle', False),
             num_workers=config.get('num_workers', 2),
             pin_memory=False,
-            persistent_workers=False
+            persistent_workers=config.get('num_workers', 2) > 0
         )
