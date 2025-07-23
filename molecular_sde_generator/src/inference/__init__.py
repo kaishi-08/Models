@@ -1,5 +1,6 @@
-from .conditional_generator import ConditionalMolecularGenerator
+from .conditional_generator import ConditionalMolecularGenerator, DDPMMolecularGenerator
 
 __all__ = [
-    'ConditionalMolecularGenerator'
+    'ConditionalMolecularGenerator',
+    'DDPMMolecularGenerator'
 ]

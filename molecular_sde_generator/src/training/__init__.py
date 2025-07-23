@@ -1,5 +1,4 @@
-from .sde_trainer import SDEMolecularTrainer
-from .losses import MolecularLoss, ScoreMatchingLoss, GeometryConsistencyLoss
+from .losses import MolecularLoss, DDPMLoss, GeometryConsistencyLoss
 from .callbacks_fixed import (
     TrainingCallback, 
     WandBLogger, 
@@ -7,15 +6,24 @@ from .callbacks_fixed import (
     EarlyStopping,
     ModelCheckpoint
 )
+from .ddpm_trainer import DDPMMolecularTrainer
 
 __all__ = [
-    'SDEMolecularTrainer',
+    # Losses
     'MolecularLoss',
-    'ScoreMatchingLoss', 
+    'DDPMLoss',  # Renamed from ScoreMatchingLoss
     'GeometryConsistencyLoss',
+    
+    # Callbacks
     'TrainingCallback',
     'WandBLogger',
     'MolecularVisualizationCallback', 
     'EarlyStopping',
-    'ModelCheckpoint'
+    'ModelCheckpoint',
+    
+    # Trainer (DDPM only)
+    'DDPMMolecularTrainer'
 ]
+
+# Framework info
+TRAINER_TYPE = "DDPM"
