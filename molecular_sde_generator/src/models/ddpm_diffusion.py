@@ -1,4 +1,4 @@
-# src/models/ddpm_diffusion.py - FIXED critical issues
+# src/models/ddpm_diffusion.py - FIXED parameter assignment issue
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -192,7 +192,7 @@ class MolecularDDPM(nn.Module):
 
 class MolecularDDPMModel(nn.Module):
     """
-    FIXED: Wrapper with better output scaling
+    🎯 FIXED: Wrapper with proper parameter handling
     """
     
     def __init__(self, base_model, ddpm: MolecularDDPM):
@@ -208,8 +208,8 @@ class MolecularDDPMModel(nn.Module):
             nn.Linear(256, hidden_dim)
         )
         
-        # 🎯 CRITICAL FIX: Add output scaling layer
-        self.output_scale = nn.Parameter(torch.tensor(1.0))  # Learnable scaling
+        # 🎯 CRITICAL FIX: Proper parameter initialization
+        self.register_parameter('output_scale', nn.Parameter(torch.tensor(1.0)))
         
     def forward(self, **kwargs):
         """
@@ -270,45 +270,35 @@ class MolecularDDPMModel(nn.Module):
         emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=1)
         return emb
     
-    def parameters(self):
-        """Get all parameters including scaling"""
-        params = list(self.base_model.parameters())
-        params.extend(list(self.time_embedding.parameters()))
-        params.append(self.output_scale)
-        return iter(params)
+    def to(self, device):
+        """🎯 FIXED: Proper device transfer for parameters"""
+        # Move base components
+        self.base_model = self.base_model.to(device)
+        self.time_embedding = self.time_embedding.to(device)
+        
+        # 🎯 CRITICAL FIX: Proper parameter device transfer
+        # Don't reassign parameter, just move the whole module
+        super().to(device)
+        return self
     
-    def eval(self):
-        """Set to evaluation mode"""
-        self.base_model.eval()
-        self.time_embedding.eval()
-        return super().eval()
-    
-    def state_dict(self):
-        """Get state dictionary"""
-        return {
-            'base_model': self.base_model.state_dict(),
-            'time_embedding': self.time_embedding.state_dict(),
-            'output_scale': self.output_scale
-        }
+    def state_dict(self, *args, **kwargs):
+        """Get state dictionary including all components"""
+        state = super().state_dict(*args, **kwargs)
+        return state
     
     def load_state_dict(self, state_dict, strict=True):
         """Load state dictionary"""
-        if 'base_model' in state_dict:
-            self.base_model.load_state_dict(state_dict['base_model'], strict=strict)
-        if 'time_embedding' in state_dict:
-            self.time_embedding.load_state_dict(state_dict['time_embedding'], strict=strict)
-        if 'output_scale' in state_dict:
-            self.output_scale.data = state_dict['output_scale']
-        else:
-            # Fallback for old checkpoints
-            try:
-                self.base_model.load_state_dict(state_dict, strict=strict)
-            except:
-                print("Warning: Could not load state dict")
-    
-    def to(self, device):
-        """Move to device"""
-        self.base_model.to(device)
-        self.time_embedding.to(device)
-        self.output_scale = self.output_scale.to(device)
-        return super().to(device)
+        try:
+            super().load_state_dict(state_dict, strict=strict)
+        except Exception as e:
+            print(f"Warning: Could not load full state dict: {e}")
+            # Try loading base model only
+            if 'base_model' in str(state_dict.keys()):
+                # Old format
+                if 'base_model' in state_dict:
+                    self.base_model.load_state_dict(state_dict['base_model'], strict=False)
+                if 'time_embedding' in state_dict:
+                    self.time_embedding.load_state_dict(state_dict['time_embedding'], strict=False)
+            else:
+                # Try loading into base model directly
+                self.base_model.load_state_dict(state_dict, strict=False)
