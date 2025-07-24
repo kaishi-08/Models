@@ -1,0 +1,75 @@
+# config/quick_test.yaml - Aggressive learning setup
+data:
+  train_path: "data/processed_full/train_generation.pkl"
+  val_path: "data/processed_full/test_generation.pkl"
+  test_path: "data/processed_full/test_generation.pkl"
+  batch_size: 8
+  num_workers: 2
+  pin_memory: false
+  shuffle: true
+  include_pocket: true
+  augment: false
+  max_atoms: 30
+
+model:
+  atom_types: 11
+  bond_types: 4
+  hidden_dim: 512        # DOUBLED
+  pocket_dim: 512        # DOUBLED  
+  num_layers: 6          # INCREASED
+  max_radius: 10.0
+  max_pocket_atoms: 300  # REDUCED for speed
+  conditioning_type: "concat"  # Different approach
+
+ddpm:
+  num_timesteps: 100     # MUCH SMALLER for testing
+  beta_schedule: "linear" # SIMPLIFIED
+  beta_start: 0.0001
+  beta_end: 0.02
+  loss_type: "mse"
+  clip_denoised: true
+
+training:
+  num_epochs: 15
+  learning_rate: 0.002   # 20x HIGHER!
+  weight_decay: 0.0001
+  grad_clip_norm: 0.5    # Tighter clipping
+  use_amp: false
+  gradient_accumulation_steps: 1
+  
+  scheduler:
+    type: "cosine_annealing"
+    T_max: 15
+    eta_min: 0.0001
+    warmup_epochs: 2
+    warmup_lr: 0.0005
+
+optimizer:
+  type: "adamw"
+  lr: 0.002              # HIGH LR
+  betas: [0.9, 0.999]
+  weight_decay: 0.0001
+  eps: 0.00000001
+
+loss_weights:
+  noise_loss: 1.0
+  atom_type_loss: 0.0    # DISABLED for focus
+  bond_type_loss: 0.0    # DISABLED for focus
+  geometry_loss: 0.0     # DISABLED for focus
+
+logging:
+  use_wandb: false
+  log_every_n_steps: 50
+  val_check_interval: 500
+  save_top_k: 3
+  save_path: "models/quick_test/"
+
+early_stopping:
+  monitor: "val_total_loss"
+  patience: 8
+  min_delta: 0.01        # Larger delta
+
+debug:
+  enable_debug_mode: true
+  debug_batches: 5
+  print_model_summary: true

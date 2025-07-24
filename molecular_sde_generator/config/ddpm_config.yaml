@@ -1,9 +1,9 @@
 
 # Data configuration
 data:
-  train_path: "data/processed/train.pkl"
-  val_path: "data/processed/test.pkl"
-  test_path: "data/processed/test.pkl"
+  train_path: "data/processed_full/train_generation.pkl"
+  val_path: "data/processed_full/test_generation.pkl"
+  test_path: "data/processed_full/test_generation.pkl"
   batch_size: 16
   num_workers: 4
   pin_memory: true
