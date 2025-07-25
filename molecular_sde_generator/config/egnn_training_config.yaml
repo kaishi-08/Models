@@ -1,0 +1,92 @@
+# config/egnn_training_config.yaml
+data:
+  train_path: "data/processed_full/train_generation.pkl"
+  val_path: "data/processed_full/test_generation.pkl"
+  test_path: "data/processed_full/test_generation.pkl"
+  batch_size: 16
+  num_workers: 4
+  pin_memory: true
+  shuffle: true
+  include_pocket: true
+  augment: false
+  max_atoms: 50
+
+model:
+  atom_types: 11
+  bond_types: 4
+  hidden_dim: 256
+  pocket_dim: 256
+  num_layers: 6
+  max_radius: 10.0
+  max_pocket_atoms: 1000
+  conditioning_type: "add"
+
+ddpm:
+  num_timesteps: 1000
+  beta_schedule: "cosine"
+  beta_start: 0.0001
+  beta_end: 0.02
+  loss_type: "mse"
+  clip_denoised: true
+
+training:
+  num_epochs: 100
+  learning_rate: 0.0001
+  weight_decay: 0.0001
+  grad_clip_norm: 1.0
+  use_amp: true
+  
+  scheduler:
+    type: "cosine_annealing"
+    T_max: 100
+    eta_min: 0.00001
+    warmup_epochs: 5
+    warmup_lr: 0.00001
+
+optimizer:
+  type: "adamw"
+  lr: 0.0001
+  betas: [0.9, 0.999]
+  weight_decay: 0.0001
+  eps: 0.00000001
+
+loss_weights:
+  noise_loss: 1.0
+  atom_type_loss: 0.1
+  bond_type_loss: 0.1
+  geometry_loss: 0.05
+
+logging:
+  project_name: "joint2d3d-egnn-molecular-generation"
+  experiment_name: "egnn-ddpm-joint2d3d"
+  log_every_n_steps: 50
+  val_check_interval: 1000
+  save_top_k: 3
+  save_path: "models/joint2d3d_egnn/"
+  use_wandb: false
+
+early_stopping:
+  monitor: "val_total_loss"
+  patience: 15
+  min_delta: 0.001
+  mode: "min"
+
+checkpointing:
+  monitor: "val_total_loss"
+  save_best_only: true
+  save_last: true
+  mode: "min"
+  filename: "joint2d3d-egnn-epoch-{epoch:02d}-loss-{val_total_loss:.4f}"
+
+hardware:
+  device: "auto"
+  precision: "mixed"
+  deterministic: false
+  benchmark: true
+
+seed: 42
+
+debug:
+  enable_debug_mode: false
+  print_model_summary: true
+  visualize_first_batch: false

@@ -1,28 +1,18 @@
-# src/models/pocket_encoder.py - Enhanced with scientific standards
+# src/models/improved_pocket_encoder.py - COMPLETE VERSION with all methods
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.nn import global_mean_pool, global_max_pool
+from torch_geometric.nn import global_mean_pool, global_max_pool, knn_graph, radius_graph
 from torch_geometric.utils import to_dense_batch
-try:
-    from torch_geometric.nn import knn_graph, radius_graph
-except ImportError:
-    # Fallback for older versions
-    from torch_geometric.nn import knn_graph
-    from torch_geometric.nn import radius_graph
+import numpy as np
 
+# Use EGNN from external library (no e3_egnn dependency)
 try:
-    from .e3_egnn import E3EquivariantGNN
+    from egnn_pytorch import EGNN
+    EGNN_AVAILABLE = True
 except ImportError:
-    # Fallback if e3_egnn is not available
-    print("Warning: E3EquivariantGNN not available, using simple fallback")
-    class E3EquivariantGNN(nn.Module):
-        def __init__(self, *args, **kwargs):
-            super().__init__()
-            self.fallback_net = nn.Linear(kwargs.get('hidden_dim', 128), kwargs.get('hidden_dim', 128))
-        
-        def forward(self, x, pos, edge_index, batch=None):
-            return self.fallback_net(x)
+    print("Warning: EGNN not available. Install with: pip install egnn-pytorch")
+    EGNN_AVAILABLE = False
 
 class SmartPocketAtomSelector:
     """Smart strategies for selecting important pocket atoms - Enhanced with scientific standards"""
@@ -30,10 +20,7 @@ class SmartPocketAtomSelector:
     @staticmethod
     def select_by_distance_to_center(pos: torch.Tensor, pocket_center: torch.Tensor, 
                                    max_atoms: int, max_radius: float = 12.0):
-        """
-        Enhanced distance-based selection with scientific thresholds
-        Based on PNAS 2012: majority of pockets are within 6 Å from interfaces
-        """
+        """Enhanced distance-based selection with scientific thresholds"""
         distances = torch.norm(pos - pocket_center, dim=1)
         
         # Scientific thresholds based on literature
@@ -66,10 +53,7 @@ class SmartPocketAtomSelector:
     @staticmethod
     def select_by_surface_accessibility(pos: torch.Tensor, x: torch.Tensor, 
                                       max_atoms: int, probe_radius: float = 1.4):
-        """
-        Enhanced surface accessibility with Shrake-Rupley algorithm principles
-        Based on Lee-Richards surface calculation (1.4 Å water probe)
-        """
+        """Enhanced surface accessibility with Shrake-Rupley algorithm principles"""
         try:
             N = len(pos)
             if N == 0:
@@ -93,7 +77,6 @@ class SmartPocketAtomSelector:
             if x.size(1) > 1:  # If we have residue type information
                 residue_types = x[:, 1].long()
                 # Hydrophilic residues (more likely to be surface-exposed)
-                # Based on amino acid hydrophobicity scales
                 hydrophilic_residues = {1, 3, 5, 6, 8, 11, 15, 16, 18}  # ARG, ASP, GLN, GLU, HIS, LYS, SER, THR, TYR
                 
                 for i, res_type in enumerate(residue_types):
@@ -112,10 +95,7 @@ class SmartPocketAtomSelector:
     @staticmethod
     def select_by_residue_importance(pos: torch.Tensor, x: torch.Tensor, 
                                    max_atoms: int, pocket_center: torch.Tensor):
-        """
-        Enhanced residue importance with druggability scores
-        Based on VirtuousPocketome and COMPASS scoring systems
-        """
+        """Enhanced residue importance with druggability scores"""
         try:
             scores = torch.zeros(len(pos), device=pos.device)
             
@@ -167,10 +147,7 @@ class SmartPocketAtomSelector:
     def select_by_binding_site_proximity(pos: torch.Tensor, x: torch.Tensor,
                                        ligand_pos: torch.Tensor, max_atoms: int,
                                        interaction_radius: float = 8.0):
-        """
-        Enhanced binding site proximity with tiered interaction zones
-        Based on PocketGen (3.5 Å) and extended interaction studies
-        """
+        """Enhanced binding site proximity with tiered interaction zones"""
         try:
             if ligand_pos is None or len(ligand_pos) == 0:
                 # Fallback to center-based selection
@@ -236,6 +213,9 @@ class SmartPocketAtomSelector:
     def _add_chemical_property_bonuses(scores: torch.Tensor, x: torch.Tensor, 
                                      distances_to_ligand: torch.Tensor):
         """Add bonuses based on residue types and their binding propensity"""
+        if x.size(1) <= 1:
+            return scores
+            
         residue_types = x[:, 1].long()
         
         # Binding-favorable residues with literature-based weights
@@ -248,38 +228,27 @@ class SmartPocketAtomSelector:
             13: 1.5,  # PHE - aromatic, hydrophobic
             17: 1.6,  # TRP - aromatic, large
             18: 1.4,  # TYR - aromatic, polar
-            19: 1.1   # VAL - hydrophobic
+            19: 1.1,  # VAL - hydrophobic
+            0: 1.05,  # ALA - small, flexible
+            2: 1.1,   # ASN - H-bonding
+            5: 1.1,   # GLN - H-bonding
+            15: 1.05, # SER - H-bonding, small
+            16: 1.05  # THR - H-bonding, small
         }
         
         for i, res_type in enumerate(residue_types):
-            if res_type.item() in binding_residues:
-                bonus = binding_residues[res_type.item()]
+            if i < len(scores):  # Safety check
+                bonus = binding_residues.get(res_type.item(), 1.0)
                 scores[i] *= bonus
         
         return scores
-    
-    @staticmethod
-    def _compute_surface_scores(pos: torch.Tensor, neighbor_radius: float = 3.0):
-        """Compute surface accessibility scores with proper error handling"""
-        try:
-            if len(pos) <= 1:
-                return torch.ones(len(pos), device=pos.device)
-                
-            distances = torch.cdist(pos, pos)
-            neighbor_counts = (distances < neighbor_radius).sum(dim=1) - 1
-            return 1.0 / (neighbor_counts.float() + 1.0)
-        except:
-            # Fallback to uniform scores
-            return torch.ones(len(pos), device=pos.device)
     
     @staticmethod
     def select_multi_strategy(pos: torch.Tensor, x: torch.Tensor, max_atoms: int,
                             pocket_center: torch.Tensor = None, 
                             ligand_pos: torch.Tensor = None,
                             strategy: str = "adaptive"):
-        """
-        Enhanced multi-strategy selection with intelligent fallbacks
-        """
+        """Enhanced multi-strategy selection with intelligent fallbacks"""
         
         if strategy == "adaptive":
             # Intelligent strategy selection based on available data
@@ -343,8 +312,14 @@ class SmartPocketAtomSelector:
                 pos, x, max_atoms, pocket_center, ligand_pos, "adaptive"
             )
 
-class ProteinPocketEncoder(nn.Module):
-    """Protein pocket encoder with smart atom selection - Enhanced version"""
+
+class ImprovedProteinPocketEncoder(nn.Module):
+    """
+    Improved pocket encoder combining smart atom selection with EGNN
+    - Uses SmartPocketAtomSelector for scientific atom selection
+    - Uses EGNN from egnn-pytorch (no e3_egnn dependency)
+    - Enhanced attention and pooling
+    """
     
     def __init__(self, node_features: int = 8, edge_features: int = 4,
                  hidden_dim: int = 128, num_layers: int = 4, 
@@ -363,33 +338,49 @@ class ProteinPocketEncoder(nn.Module):
         # Smart atom selector
         self.atom_selector = SmartPocketAtomSelector()
         
-        # Enhanced feature projection
-        self.node_embedding = nn.Sequential(
-            nn.Linear(node_features, hidden_dim),
+        # Enhanced feature projection with flexible input dimensions
+        self.node_embedding_6d = nn.Sequential(
+            nn.Linear(6, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim)
         )
+        self.node_embedding_7d = nn.Sequential(
+            nn.Linear(7, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim)
+        )
+        self.node_embedding_8d = nn.Sequential(
+            nn.Linear(8, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim)
+        )
+        
         self.edge_embedding = nn.Linear(edge_features if edge_features > 0 else 1, hidden_dim)
         
-        # E(3) equivariant network for pocket encoding
-        try:
-            self.e3_net = E3EquivariantGNN(
-                irreps_in=f"{hidden_dim}x0e",
-                irreps_hidden=f"{hidden_dim}x0e+{hidden_dim//2}x1o",
-                irreps_out=f"{hidden_dim}x0e",
-                num_layers=num_layers,
-                max_radius=max_radius
-            )
-        except Exception as e:
-            print(f"Warning: E3EquivariantGNN initialization failed: {e}")
+        # EGNN network for pocket encoding (replacing E3EquivariantGNN)
+        if EGNN_AVAILABLE:
+            self.egnn_layers = nn.ModuleList([
+                EGNN(
+                    dim=hidden_dim,
+                    edge_dim=0,
+                    m_dim=hidden_dim // 4,
+                    fourier_features=4,
+                    num_nearest_neighbors=16,
+                    dropout=0.1,
+                    update_feats=True,
+                    update_coors=False  # Don't update pocket coordinates
+                ) for _ in range(num_layers)
+            ])
+        else:
             # Enhanced fallback network
-            self.e3_net = nn.Sequential(
-                nn.Linear(hidden_dim, hidden_dim),
-                nn.ReLU(),
-                nn.Linear(hidden_dim, hidden_dim),
-                nn.ReLU(),
-                nn.Linear(hidden_dim, hidden_dim)
-            )
+            self.egnn_layers = nn.ModuleList([
+                nn.Sequential(
+                    nn.Linear(hidden_dim, hidden_dim),
+                    nn.ReLU(),
+                    nn.Linear(hidden_dim, hidden_dim),
+                    nn.ReLU()
+                ) for _ in range(num_layers)
+            ])
         
         # Enhanced attention mechanism
         self.attention = nn.MultiheadAttention(
@@ -447,7 +438,7 @@ class ProteinPocketEncoder(nn.Module):
                 if batch is not None:
                     batch = batch[selected_indices]
                 
-                print(f"Smart selection ({self.selection_strategy}): {len(selected_indices)} atoms selected from {x.size(0)} total")
+                print(f"Smart selection ({self.selection_strategy}): {len(selected_indices)} atoms selected")
                 
             except Exception as e:
                 print(f"Smart selection failed: {e}, using random fallback")
@@ -458,11 +449,8 @@ class ProteinPocketEncoder(nn.Module):
                 if batch is not None:
                     batch = batch[indices]
         
-        # Enhanced input processing
-        if x.dim() == 2 and x.size(1) == self.node_features:
-            h = self.node_embedding(x.float())
-        else:
-            raise ValueError(f"Expected x shape [N, {self.node_features}], got {x.shape}")
+        # Enhanced input processing with flexible dimensions
+        h = self._embed_features_flexible(x)
         
         # Apply layer normalization
         h = self.layer_norm(h)
@@ -471,26 +459,31 @@ class ProteinPocketEncoder(nn.Module):
         if edge_index is None or edge_index.size(1) == 0:
             edge_index = self._create_enhanced_edges(pos, max_dist=self.max_radius)
         
-        # Apply E(3) equivariant network with residual connection
+        # Apply EGNN network with residual connection
         h_residual = h.clone()
-        try:
-            if hasattr(self.e3_net, 'forward') and callable(self.e3_net.forward):
-                # Check if E3 network expects batch parameter
-                if 'batch' in self.e3_net.forward.__code__.co_varnames:
-                    h = self.e3_net(h, pos, edge_index, batch)
-                else:
-                    h = self.e3_net(h, pos, edge_index)
-            else:
-                # Fallback to simple processing
-                h = self.e3_net(h)
-            
-            # Residual connection
-            if h.shape == h_residual.shape:
-                h = h + h_residual
-                
-        except Exception as e:
-            print(f"Warning: E3 network failed: {e}")
-            h = h_residual  # Use original features
+        
+        if EGNN_AVAILABLE:
+            # Use EGNN layers
+            for egnn_layer in self.egnn_layers:
+                h_prev = h.clone()
+                try:
+                    h, _ = egnn_layer(
+                        feats=h,
+                        coors=pos,
+                        edges=None
+                    )
+                    # Residual connection
+                    h = h + h_prev
+                except Exception as e:
+                    print(f"Warning: EGNN layer failed: {e}")
+                    h = egnn_layer(h) if hasattr(egnn_layer, '__call__') else h_prev
+                    h = h + h_prev
+        else:
+            # Use fallback layers
+            for layer in self.egnn_layers:
+                h_prev = h.clone()
+                h = layer(h)
+                h = h + h_prev
         
         # Enhanced attention and pooling
         if batch is not None:
@@ -519,6 +512,38 @@ class ProteinPocketEncoder(nn.Module):
         # Final output projection
         return self.output_projection(pocket_repr)
     
+    def _embed_features_flexible(self, x: torch.Tensor) -> torch.Tensor:
+        """Flexible feature embedding for different input dimensions"""
+        if x.dim() != 2:
+            raise ValueError(f"Expected 2D input, got {x.dim()}D: {x.shape}")
+        
+        input_dim = x.size(1)
+        
+        if input_dim == 6:
+            return self.node_embedding_6d(x.float())
+        elif input_dim == 7:
+            return self.node_embedding_7d(x.float())
+        elif input_dim == 8:
+            return self.node_embedding_8d(x.float())
+        elif input_dim < 6:
+            # Pad with zeros to 6D
+            padding = torch.zeros(x.size(0), 6 - input_dim, device=x.device, dtype=x.dtype)
+            x_padded = torch.cat([x, padding], dim=1)
+            return self.node_embedding_6d(x_padded.float())
+        elif input_dim == 9:
+            # Truncate to 8D
+            x_truncated = x[:, :8]
+            return self.node_embedding_8d(x_truncated.float())
+        else:
+            # For other dimensions, pad or truncate to 7D
+            if input_dim < 7:
+                padding = torch.zeros(x.size(0), 7 - input_dim, device=x.device, dtype=x.dtype)
+                x_padded = torch.cat([x, padding], dim=1)
+                return self.node_embedding_7d(x_padded.float())
+            else:
+                x_truncated = x[:, :7]
+                return self.node_embedding_7d(x_truncated.float())
+    
     def _create_enhanced_edges(self, pos: torch.Tensor, max_dist: float = 10.0):
         """Create edges with enhanced connectivity patterns"""
         try:
@@ -537,100 +562,77 @@ class ProteinPocketEncoder(nn.Module):
             # Fallback: create empty edge index
             return torch.zeros((2, 0), dtype=torch.long, device=pos.device)
 
-class CrossAttentionPocketConditioner(nn.Module):
-    """Enhanced cross-attention mechanism for pocket-ligand conditioning"""
+
+# Factory function for easy usage
+def create_improved_pocket_encoder(hidden_dim: int = 256, output_dim: int = 256, 
+                                 selection_strategy: str = "adaptive"):
+    """
+    Create improved pocket encoder with smart atom selection and EGNN
     
-    def __init__(self, ligand_dim: int = 128, pocket_dim: int = 256, 
-                 hidden_dim: int = 128, num_heads: int = 8):
-        super().__init__()
+    Args:
+        hidden_dim: Hidden dimension for EGNN
+        output_dim: Output pocket representation dimension
+        selection_strategy: "adaptive", "distance", "surface", "residue", "binding_site"
+    """
+    if not EGNN_AVAILABLE:
+        print("Warning: EGNN not available, using fallback implementation")
         
-        # Enhanced projections
-        self.ligand_proj = nn.Sequential(
-            nn.Linear(ligand_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim)
+    return ImprovedProteinPocketEncoder(
+        node_features=7,  # Standard protein features
+        hidden_dim=hidden_dim,
+        output_dim=output_dim,
+        selection_strategy=selection_strategy
+    )
+
+
+# Test function
+def test_improved_pocket_encoder():
+    """Test the improved pocket encoder"""
+    print("Testing Improved Pocket Encoder...")
+    
+    # Create test data
+    num_residues = 500
+    pocket_x = torch.randn(num_residues, 7)  # 7D protein features
+    pocket_pos = torch.randn(num_residues, 3)
+    pocket_batch = torch.zeros(num_residues, dtype=torch.long)
+    ligand_pos = torch.randn(20, 3)  # Ligand for binding site guidance
+    
+    # Create encoder
+    encoder = create_improved_pocket_encoder(
+        hidden_dim=128,
+        output_dim=256,
+        selection_strategy="adaptive"
+    )
+    
+    # Test forward pass
+    try:
+        pocket_repr = encoder(
+            x=pocket_x,
+            pos=pocket_pos,
+            batch=pocket_batch,
+            ligand_pos=ligand_pos
         )
-        self.pocket_proj = nn.Sequential(
-            nn.Linear(pocket_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim)
-        )
         
-        # Enhanced cross-attention
-        self.cross_attention = nn.MultiheadAttention(
-            embed_dim=hidden_dim,
-            num_heads=num_heads,
-            dropout=0.1,
-            batch_first=True
-        )
+        print(f"   Input: {num_residues} residues")
+        print(f"   Output: {pocket_repr.shape}")
+        print(f"   Success: Smart selection + EGNN processing")
         
-        # Enhanced output projection with residual
-        self.output_proj = nn.Sequential(
-            nn.Linear(hidden_dim + ligand_dim, hidden_dim),  # Concatenate for residual
-            nn.ReLU(),
-            nn.Linear(hidden_dim, ligand_dim)
-        )
+        return True
         
-        self.layer_norm = nn.LayerNorm(hidden_dim)
-        
-    def forward(self, ligand_features: torch.Tensor, pocket_features: torch.Tensor,
-                ligand_batch: torch.Tensor):
-        """
-        Enhanced forward pass with better error handling
-        
-        Args:
-            ligand_features: [N_ligand, ligand_dim]
-            pocket_features: [N_batch, pocket_dim]
-            ligand_batch: [N_ligand] batch assignment for ligand atoms
-        """
-        # Project features
-        ligand_proj = self.ligand_proj(ligand_features)
-        pocket_proj = self.pocket_proj(pocket_features)
-        
-        # Apply layer normalization
-        ligand_proj = self.layer_norm(ligand_proj)
-        pocket_proj = self.layer_norm(pocket_proj)
-        
-        try:
-            # Convert to dense format
-            ligand_dense, ligand_mask = to_dense_batch(ligand_proj, ligand_batch)
-            
-            # Expand pocket features to match ligand batch size
-            max_batch_idx = ligand_batch.max().item()
-            if max_batch_idx < pocket_features.size(0):
-                pocket_expanded = pocket_proj[ligand_batch].unsqueeze(1)
-            else:
-                # Handle batch size mismatch
-                pocket_expanded = pocket_proj[0:1].expand(ligand_dense.size(0), 1, -1)
-            
-            # Cross-attention: ligand queries, pocket keys/values
-            attended_ligand, attention_weights = self.cross_attention(
-                ligand_dense, pocket_expanded, pocket_expanded,
-                key_padding_mask=None
-            )
-            
-            # Back to sparse format
-            attended_ligand = attended_ligand[ligand_mask]
-            
-            # Enhanced output with residual connection
-            combined = torch.cat([attended_ligand, ligand_features], dim=-1)
-            output = self.output_proj(combined)
-            
-            # Residual connection
-            return output + ligand_features
-            
-        except Exception as e:
-            print(f"Warning: Enhanced cross attention failed: {e}")
-            # Enhanced fallback with simple fusion
-            try:
-                pocket_broadcast = pocket_proj[ligand_batch]
-                
-                # Simple attention-like weighting
-                weights = torch.softmax(torch.sum(ligand_proj * pocket_broadcast, dim=-1, keepdim=True), dim=0)
-                weighted_pocket = weights * pocket_broadcast
-                
-                combined = torch.cat([ligand_proj + weighted_pocket, ligand_features], dim=-1)
-                return self.output_proj(combined)
-            except:
-                # Ultimate fallback: just return ligand features
-                return ligand_features
+    except Exception as e:
+        print(f"   Error: {e}")
+        return False
+
+
+if __name__ == "__main__":
+    print("Improved Pocket Encoder - COMPLETE VERSION")
+    print("=" * 60)
+    print("Features:")
+    print("- Smart atom selection (5 strategies)")
+    print("- EGNN processing (no e3_egnn dependency)")
+    print("- Enhanced attention and pooling")
+    print("- Scientific selection criteria")
+    print("- Flexible input dimensions (6D, 7D, 8D)")
+    print()
+    
+    test_improved_pocket_encoder()

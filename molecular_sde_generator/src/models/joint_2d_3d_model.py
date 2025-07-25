@@ -1,9 +1,17 @@
-# src/models/joint_2d_3d_model.py - Original Joint2D3D Model (EGNN Only)
+# src/models/joint_2d_3d_model.py - Original with MINIMAL changes for ImprovedPocketEncoder
 import torch
 import torch.nn as nn
 from torch_geometric.nn import global_mean_pool, global_max_pool, SchNet, DimeNet
 from torch_geometric.utils import to_dense_batch, radius_graph
 from .base_model import MolecularModel
+
+# 🔄 ONLY CHANGE: Import improved pocket encoder
+try:
+    from .pocket_encoder import create_improved_pocket_encoder
+    IMPROVED_POCKET_AVAILABLE = True
+except ImportError:
+    print("Warning: ImprovedProteinPocketEncoder not available, using fallback")
+    IMPROVED_POCKET_AVAILABLE = False
 
 # Try to import EGNN, fallback if not available
 try:
@@ -26,7 +34,7 @@ class Joint2D3DMolecularModel(MolecularModel):
     Features:
     - 2D: Chemical topology with bond information
     - 3D: SE(3) equivariant geometric processing
-    - Pocket: Advanced conditioning
+    - Pocket: Advanced conditioning with ImprovedProteinPocketEncoder
     - EGNN backend only (removed SchNet, DimeNet)
     """
     
@@ -34,7 +42,8 @@ class Joint2D3DMolecularModel(MolecularModel):
                  hidden_dim: int = 256, pocket_dim: int = 256,
                  num_layers: int = 6, max_radius: float = 10.0,
                  max_pocket_atoms: int = 1000,
-                 conditioning_type: str = "add"):
+                 conditioning_type: str = "add",
+                 pocket_selection_strategy: str = "adaptive"):  # 🔄 NEW PARAMETER
         super().__init__(atom_types, bond_types, hidden_dim)
         
         self.pocket_dim = pocket_dim
@@ -42,6 +51,7 @@ class Joint2D3DMolecularModel(MolecularModel):
         self.max_radius = max_radius
         self.max_pocket_atoms = max_pocket_atoms
         self.conditioning_type = conditioning_type
+        self.pocket_selection_strategy = pocket_selection_strategy  # 🔄 NEW
         
         # Validate EGNN backend
         if not EGNN_AVAILABLE:
@@ -92,13 +102,23 @@ class Joint2D3DMolecularModel(MolecularModel):
         # 2D-3D fusion module
         self.fusion_layer = Enhanced2D3DFusion(hidden_dim)
         
-        # Pocket encoder
-        self.pocket_encoder = EnhancedPocketEncoder(
-            input_dim=hidden_dim,
-            hidden_dim=hidden_dim,
-            output_dim=pocket_dim,
-            max_atoms=max_pocket_atoms
-        )
+        # 🔄 MAIN CHANGE: Use improved pocket encoder if available
+        if IMPROVED_POCKET_AVAILABLE:
+            self.pocket_encoder = create_improved_pocket_encoder(
+                hidden_dim=hidden_dim,
+                output_dim=pocket_dim,
+                selection_strategy=pocket_selection_strategy
+            )
+            print(f"Using ImprovedProteinPocketEncoder with strategy: {pocket_selection_strategy}")
+        else:
+            # Fallback to original enhanced encoder
+            self.pocket_encoder = EnhancedPocketEncoder(
+                input_dim=hidden_dim,
+                hidden_dim=hidden_dim,
+                output_dim=pocket_dim,
+                max_atoms=max_pocket_atoms
+            )
+            print("Using fallback EnhancedPocketEncoder")
         
         # Conditioning module
         if conditioning_type == "add":
@@ -154,9 +174,10 @@ class Joint2D3DMolecularModel(MolecularModel):
             atom_emb, pos, edge_index, edge_attr, batch
         )
         
-        # Pocket conditioning
+        # 🔄 ENHANCED: Pocket conditioning with ligand position guidance
         pocket_condition = self._encode_pocket_flexible(
-            pocket_x, pocket_pos, pocket_edge_index, pocket_batch, batch
+            pocket_x, pocket_pos, pocket_edge_index, pocket_batch, batch,
+            ligand_pos=pos  # 🔄 Pass ligand position for smart selection
         )
         
         if pocket_condition is not None:
@@ -273,16 +294,27 @@ class Joint2D3DMolecularModel(MolecularModel):
     
     def _encode_pocket_flexible(self, pocket_x: torch.Tensor, pocket_pos: torch.Tensor,
                                pocket_edge_index: torch.Tensor, pocket_batch: torch.Tensor,
-                               ligand_batch: torch.Tensor) -> torch.Tensor:
-        """Enhanced pocket encoding with GNN backend support"""
+                               ligand_batch: torch.Tensor, ligand_pos: torch.Tensor = None) -> torch.Tensor:
+        """🔄 ENHANCED: Pocket encoding with ligand position guidance"""
         if pocket_x is None or pocket_pos is None:
             return None
         
         try:
-            # Use enhanced pocket encoder
-            pocket_repr = self.pocket_encoder(
-                pocket_x, pocket_pos, pocket_edge_index, pocket_batch
-            )
+            # 🔄 ENHANCED: Pass ligand position to improved encoder for smart selection
+            if IMPROVED_POCKET_AVAILABLE and hasattr(self.pocket_encoder, 'forward'):
+                # ImprovedProteinPocketEncoder supports ligand_pos parameter
+                pocket_repr = self.pocket_encoder(
+                    x=pocket_x, 
+                    pos=pocket_pos, 
+                    edge_index=pocket_edge_index, 
+                    batch=pocket_batch,
+                    ligand_pos=ligand_pos  # 🔄 Enable binding site proximity selection
+                )
+            else:
+                # Fallback to original encoder
+                pocket_repr = self.pocket_encoder(
+                    pocket_x, pocket_pos, pocket_edge_index, pocket_batch
+                )
             return pocket_repr
             
         except Exception as e:
@@ -338,7 +370,7 @@ class Enhanced2D3DFusion(nn.Module):
         return self.norm(fused + features)  # Residual
 
 class EnhancedPocketEncoder(nn.Module):
-    """Enhanced pocket encoder with EGNN support"""
+    """Enhanced pocket encoder with EGNN support - FALLBACK VERSION"""
     
     def __init__(self, input_dim: int, hidden_dim: int, output_dim: int, 
                  max_atoms: int = 1000):
@@ -436,7 +468,8 @@ class EnhancedPocketEncoder(nn.Module):
 
 # Factory functions for easy usage
 
-def create_joint2d3d_egnn_model(hidden_dim: int = 256, num_layers: int = 6):
+def create_joint2d3d_egnn_model(hidden_dim: int = 256, num_layers: int = 6,
+                               pocket_selection_strategy: str = "adaptive"):  # 🔄 NEW PARAMETER
     """
     RECOMMENDED: Create Joint2D3D model with EGNN backend
     
@@ -444,6 +477,10 @@ def create_joint2d3d_egnn_model(hidden_dim: int = 256, num_layers: int = 6):
     - SE(3) equivariant
     - Proper edge attribute usage
     - Joint 2D-3D processing
+    - 🔄 Smart pocket atom selection strategies
+    
+    Args:
+        pocket_selection_strategy: "adaptive", "distance", "surface", "residue", "binding_site"
     """
     if not EGNN_AVAILABLE:
         raise ImportError("EGNN not available! Install with: pip install egnn-pytorch")
@@ -452,7 +489,8 @@ def create_joint2d3d_egnn_model(hidden_dim: int = 256, num_layers: int = 6):
         atom_types=11,
         bond_types=4,
         hidden_dim=hidden_dim,
-        num_layers=num_layers
+        num_layers=num_layers,
+        pocket_selection_strategy=pocket_selection_strategy  # 🔄 NEW
     )
 
 # Testing and validation
@@ -503,51 +541,65 @@ def test_joint2d3d_model_equivariance(model, device='cpu'):
 
 # Usage example
 if __name__ == "__main__":
-    print("Joint2D3D Molecular Model - EGNN VERSION")
-    print("=" * 60)
+    print("Joint2D3D Molecular Model - EGNN VERSION with Smart Pocket Selection")
+    print("=" * 70)
     
     # Test EGNN model
     if EGNN_AVAILABLE:
         print("Testing EGNN Model:")
         
-        egnn_model = create_joint2d3d_egnn_model(hidden_dim=128, num_layers=4)
+        # 🔄 Test different pocket selection strategies
+        strategies = ["adaptive", "distance", "surface", "binding_site"]
         
-        # Basic forward pass test
-        try:
-            x = torch.randn(10, 6)
-            pos = torch.randn(10, 3)
-            edge_index = torch.randint(0, 10, (2, 15))
-            edge_attr = torch.randn(15, 4)
-            batch = torch.zeros(10, dtype=torch.long)
+        for strategy in strategies:
+            print(f"\n📍 Testing with pocket strategy: {strategy}")
+            try:
+                egnn_model = create_joint2d3d_egnn_model(
+                    hidden_dim=128, 
+                    num_layers=4,
+                    pocket_selection_strategy=strategy
+                )
+                
+                # Basic forward pass test
+                x = torch.randn(10, 6)
+                pos = torch.randn(10, 3)
+                edge_index = torch.randint(0, 10, (2, 15))
+                edge_attr = torch.randn(15, 4)
+                batch = torch.zeros(10, dtype=torch.long)
+                
+                outputs = egnn_model(x, pos, edge_index, edge_attr, batch)
+                
+                print(f"   ✅ Forward pass successful with {strategy} strategy")
+                print(f"   Output shapes:")
+                print(f"     atom_logits: {outputs['atom_logits'].shape}")
+                print(f"     pos_pred: {outputs['pos_pred'].shape}")
+                print(f"     bond_logits: {outputs['bond_logits'].shape}")
+                
+            except Exception as e:
+                print(f"   ❌ Error with {strategy}: {e}")
+        
+        # Test equivariance with default model
+        print(f"\n🔄 Testing SE(3) Equivariance:")
+        default_model = create_joint2d3d_egnn_model(hidden_dim=128, num_layers=4)
+        test_joint2d3d_model_equivariance(default_model)
             
-            outputs = egnn_model(x, pos, edge_index, edge_attr, batch)
-            
-            print("   Forward pass successful")
-            print(f"   Output shapes:")
-            print(f"     atom_logits: {outputs['atom_logits'].shape}")
-            print(f"     pos_pred: {outputs['pos_pred'].shape}")
-            print(f"     bond_logits: {outputs['bond_logits'].shape}")
-            
-            # Test equivariance
-            test_joint2d3d_model_equivariance(egnn_model)
-            
-        except Exception as e:
-            print(f"   Error: {e}")
     else:
         print("EGNN not available!")
         print("Install with: pip install egnn-pytorch")
     
-    print(f"\nRECOMMENDATION:")
+    print(f"\n🎯 RECOMMENDATION:")
     print(f"   Use create_joint2d3d_egnn_model() for best performance!")
     print(f"   - SE(3) equivariant")
     print(f"   - Proper edge attributes") 
     print(f"   - Joint 2D-3D processing")
+    print(f"   - 🔄 Smart pocket atom selection")
     
-    print(f"\nInstallation:")
+    print(f"\n📦 Installation:")
     print(f"   pip install egnn-pytorch        # For EGNN (recommended)")
     print(f"   pip install torch-geometric     # For base dependencies")
     
-    print(f"\nJoint2D3D Model - EGNN ONLY VERSION!")
+    print(f"\n🚀 Joint2D3D Model - ENHANCED VERSION!")
     print(f"   (a) Proper edge attribute usage")
     print(f"   (b) True SE(3) equivariant processing")
     print(f"   (c) Enhanced position-graph interaction")
+    print(f"   🔄 (d) Smart pocket atom selection strategies")
