@@ -1,4 +1,4 @@
-# scripts/train_ddpm.py - Robust version with type checking
+# scripts/train_ddpm.py - Fixed for EGNN Joint2D3D Model
 import os
 import sys
 import yaml
@@ -14,18 +14,19 @@ project_root = Path(__file__).parent.parent.absolute()
 sys.path.insert(0, str(project_root))
 sys.path.insert(0, str(project_root / "src"))
 
-print(f"📁 Project root: {project_root}")
+print(f"Project root: {project_root}")
 
 try:
-    from src.models.joint_2d_3d_model import Joint2D3DMolecularModel
+    from src.models.joint_2d_3d_model import create_joint2d3d_egnn_model
     from src.models.ddpm_diffusion import MolecularDDPM, MolecularDDPMModel
     from src.data.data_loaders import CrossDockDataLoader
     from src.training.ddpm_trainer import DDPMMolecularTrainer
     from src.training.callbacks_fixed import WandBLogger, EarlyStopping, ModelCheckpoint
     from src.utils.molecular_utils import MolecularMetrics
-    print("✅ All imports successful")
+    print("All imports successful")
 except ImportError as e:
-    print(f"❌ Import error: {e}")
+    print(f"Import error: {e}")
+    print("Make sure to install: pip install egnn-pytorch")
     sys.exit(1)
 
 warnings.filterwarnings('ignore')
@@ -57,7 +58,7 @@ def safe_bool(value: Any, default: bool = False) -> bool:
 
 def validate_config(config: Dict[str, Any]) -> Dict[str, Any]:
     """Validate and fix config types"""
-    print("🔧 Validating configuration...")
+    print("Validating configuration...")
     
     # Fix optimizer config
     if 'optimizer' in config:
@@ -76,9 +77,9 @@ def validate_config(config: Dict[str, Any]) -> Dict[str, Any]:
             else:
                 opt_config['betas'] = [0.9, 0.999]
         
-        print(f"   ✅ Optimizer lr: {opt_config['lr']}")
-        print(f"   ✅ Optimizer eps: {opt_config['eps']}")
-        print(f"   ✅ Optimizer betas: {opt_config['betas']}")
+        print(f"   Optimizer lr: {opt_config['lr']}")
+        print(f"   Optimizer eps: {opt_config['eps']}")
+        print(f"   Optimizer betas: {opt_config['betas']}")
     
     # Fix training config
     if 'training' in config:
@@ -103,7 +104,7 @@ def validate_config(config: Dict[str, Any]) -> Dict[str, Any]:
         model_config['bond_types'] = safe_int(model_config.get('bond_types', 4))
         model_config['hidden_dim'] = safe_int(model_config.get('hidden_dim', 256))
         model_config['pocket_dim'] = safe_int(model_config.get('pocket_dim', 256))
-        model_config['num_layers'] = safe_int(model_config.get('num_layers', 4))
+        model_config['num_layers'] = safe_int(model_config.get('num_layers', 6))
         model_config['max_radius'] = safe_float(model_config.get('max_radius', 10.0))
         model_config['max_pocket_atoms'] = safe_int(model_config.get('max_pocket_atoms', 1000))
     
@@ -114,18 +115,18 @@ def validate_config(config: Dict[str, Any]) -> Dict[str, Any]:
         ddpm_config['beta_start'] = safe_float(ddpm_config.get('beta_start', 0.0001))
         ddpm_config['beta_end'] = safe_float(ddpm_config.get('beta_end', 0.02))
     
-    print("✅ Configuration validated")
+    print("Configuration validated")
     return config
 
 def setup_device():
     """Setup computing device"""
     if torch.cuda.is_available():
         device = torch.device('cuda')
-        print(f"🚀 Using GPU: {torch.cuda.get_device_name()}")
+        print(f"Using GPU: {torch.cuda.get_device_name()}")
         print(f"   GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
     else:
         device = torch.device('cpu')
-        print("💻 Using CPU")
+        print("Using CPU")
     
     return device
 
@@ -136,35 +137,29 @@ def check_data_files(config):
         config['data']['val_path']
     ]
     
-    print("📂 Checking data files...")
+    print("Checking data files...")
     for file_path in required_files:
         full_path = project_root / file_path
         if not full_path.exists():
-            print(f"❌ Missing: {full_path}")
-            print("\n🔧 Run preprocessing first:")
+            print(f"Missing: {full_path}")
+            print("\nRun preprocessing first:")
             print("   python scripts/preprocess_crossdock_data.py")
             return False
         else:
             size_mb = full_path.stat().st_size / (1024 * 1024)
-            print(f"✅ Found: {file_path} ({size_mb:.1f} MB)")
+            print(f"Found: {file_path} ({size_mb:.1f} MB)")
     
     return True
 
 def create_model(config, device):
-    """Create DDPM molecular model with error handling"""
-    print("🧠 Creating DDPM model...")
+    """Create EGNN DDPM molecular model"""
+    print("Creating EGNN DDPM model...")
     
     try:
-        # Create base molecular model
-        base_model = Joint2D3DMolecularModel(
-            atom_types=config['model']['atom_types'],
-            bond_types=config['model']['bond_types'],
+        # Create EGNN Joint2D3D model
+        base_model = create_joint2d3d_egnn_model(
             hidden_dim=config['model']['hidden_dim'],
-            pocket_dim=config['model']['pocket_dim'],
-            num_layers=config['model']['num_layers'],
-            max_radius=config['model']['max_radius'],
-            max_pocket_atoms=config['model']['max_pocket_atoms'],
-            conditioning_type=config['model']['conditioning_type']
+            num_layers=config['model']['num_layers']
         ).to(device)
         
         # Create DDPM
@@ -189,14 +184,14 @@ def create_model(config, device):
         return model, ddpm
         
     except Exception as e:
-        print(f"❌ Error creating model: {e}")
+        print(f"Error creating model: {e}")
         import traceback
         traceback.print_exc()
         return None, None
 
 def create_data_loaders(config):
     """Create train and validation data loaders"""
-    print("📊 Creating data loaders...")
+    print("Creating data loaders...")
     
     try:
         # Create loaders with validated config
@@ -208,31 +203,31 @@ def create_data_loaders(config):
         print(f"   Batch size: {config['data']['batch_size']}")
         
         # Test loading a batch
-        print("🧪 Testing data loading...")
+        print("Testing data loading...")
         try:
             test_batch = next(iter(train_loader))
             if test_batch is not None:
-                print(f"   ✅ Sample batch: {test_batch.x.shape[0]} atoms, {test_batch.edge_index.shape[1]} bonds")
+                print(f"   Sample batch: {test_batch.x.shape[0]} atoms, {test_batch.edge_index.shape[1]} bonds")
                 if hasattr(test_batch, 'pocket_x') and test_batch.pocket_x is not None:
-                    print(f"   ✅ Pocket data: {test_batch.pocket_x.shape[0]} pocket atoms")
+                    print(f"   Pocket data: {test_batch.pocket_x.shape[0]} pocket atoms")
                 else:
-                    print(f"   ⚠️  No pocket data in batch")
+                    print(f"   No pocket data in batch")
             else:
-                print("   ⚠️  First batch is None")
+                print("   First batch is None")
         except Exception as e:
-            print(f"   ❌ Error testing batch: {e}")
+            print(f"   Error testing batch: {e}")
         
         return train_loader, val_loader
         
     except Exception as e:
-        print(f"❌ Error creating data loaders: {e}")
+        print(f"Error creating data loaders: {e}")
         import traceback
         traceback.print_exc()
         return None, None
 
 def create_trainer(model, ddpm, config, device):
     """Create DDPM trainer with validated config"""
-    print("🏋️ Setting up trainer...")
+    print("Setting up trainer...")
     
     try:
         # Create optimizer with validated parameters
@@ -259,7 +254,7 @@ def create_trainer(model, ddpm, config, device):
                 eps=opt_config['eps']
             )
         
-        print("   ✅ Optimizer created successfully")
+        print("   Optimizer created successfully")
         
         # Create scheduler
         scheduler = None
@@ -271,9 +266,9 @@ def create_trainer(model, ddpm, config, device):
                     T_max=safe_int(sched_config['T_max'], 100),
                     eta_min=safe_float(sched_config['eta_min'], 1e-5)
                 )
-                print("   ✅ Cosine annealing scheduler created")
+                print("   Cosine annealing scheduler created")
         
-        # Create callbacks (minimal for test)
+        # Create callbacks
         callbacks = []
         
         # Early stopping
@@ -283,7 +278,7 @@ def create_trainer(model, ddpm, config, device):
                 patience=safe_int(config['early_stopping']['patience'], 15),
                 min_delta=safe_float(config['early_stopping']['min_delta'], 0.001)
             ))
-            print("   ✅ Early stopping enabled")
+            print("   Early stopping enabled")
         
         # Model checkpointing
         if 'checkpointing' in config:
@@ -294,7 +289,7 @@ def create_trainer(model, ddpm, config, device):
                 monitor=config['checkpointing']['monitor'],
                 save_best_only=safe_bool(config['checkpointing']['save_best_only'], True)
             ))
-            print(f"   ✅ Model checkpointing: {save_path}")
+            print(f"   Model checkpointing: {save_path}")
         
         # Create trainer
         trainer = DDPMMolecularTrainer(
@@ -306,34 +301,39 @@ def create_trainer(model, ddpm, config, device):
             callbacks=callbacks
         )
         
-        print(f"   ✅ Trainer created with {len(callbacks)} callbacks")
+        print(f"   Trainer created with {len(callbacks)} callbacks")
         return trainer
         
     except Exception as e:
-        print(f"❌ Error creating trainer: {e}")
+        print(f"Error creating trainer: {e}")
         import traceback
         traceback.print_exc()
         return None
 
 def main():
-    parser = argparse.ArgumentParser(description='Train DDPM Molecular Generator')
-    parser.add_argument('--config', type=str, default='config/ddpm_config.yaml')
+    parser = argparse.ArgumentParser(description='Train DDPM Joint2D3D EGNN Molecular Generator')
+    parser.add_argument('--config', type=str, default='config/egnn_training_config.yaml')
     parser.add_argument('--test', action='store_true', help='Quick test mode')
     parser.add_argument('--epochs', type=int, help='Override epochs')
     parser.add_argument('--batch_size', type=int, help='Override batch size')
     
     args = parser.parse_args()
     
-    print("🧬 DDPM Molecular Generator Training")
+    print("Joint2D3D EGNN DDPM Molecular Generator Training")
     print("=" * 60)
-    print(f"⏰ Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
     # Load configuration
     config_path = project_root / args.config
-    print(f"📋 Loading config: {config_path}")
+    print(f"Loading config: {config_path}")
     
     if not config_path.exists():
-        print(f"❌ Config file not found: {config_path}")
+        print(f"Config file not found: {config_path}")
+        print("Available configs:")
+        config_dir = project_root / "config"
+        if config_dir.exists():
+            for f in config_dir.glob("*.yaml"):
+                print(f"  {f}")
         return
     
     with open(config_path, 'r') as f:
@@ -344,7 +344,7 @@ def main():
         config['training']['num_epochs'] = 2
         config['data']['batch_size'] = 4
         config['logging']['use_wandb'] = False
-        print("🧪 Test mode: 2 epochs, batch size 4")
+        print("Test mode: 2 epochs, batch size 4")
     
     # Apply overrides
     if args.epochs:
@@ -378,7 +378,7 @@ def main():
         return
     
     # Start training
-    print("\n🚀 Starting training...")
+    print("\nStarting training...")
     try:
         trainer.train(
             train_loader=train_loader,
@@ -386,9 +386,9 @@ def main():
             num_epochs=config['training']['num_epochs'],
             save_path=str(project_root / config['logging']['save_path'] / "best_model.pth")
         )
-        print("🎉 Training completed!")
+        print("Training completed!")
     except Exception as e:
-        print(f"❌ Training failed: {e}")
+        print(f"Training failed: {e}")
         import traceback
         traceback.print_exc()
 
