@@ -1,4 +1,4 @@
-# scripts/train_ddpm.py - Fixed for EGNN Joint2D3D Model
+# scripts/train_ddpm.py - UPDATED for SchNet Backend
 import os
 import sys
 import yaml
@@ -17,16 +17,17 @@ sys.path.insert(0, str(project_root / "src"))
 print(f"Project root: {project_root}")
 
 try:
-    from src.models.joint_2d_3d_model import create_joint2d3d_egnn_model
+    # 🎯 UPDATED: Import SchNet model instead of EGNN
+    from src.models.joint_2d_3d_model import create_joint2d3d_schnet_model
     from src.models.ddpm_diffusion import MolecularDDPM, MolecularDDPMModel
     from src.data.data_loaders import CrossDockDataLoader
     from src.training.ddpm_trainer import DDPMMolecularTrainer
     from src.training.callbacks_fixed import WandBLogger, EarlyStopping, ModelCheckpoint
     from src.utils.molecular_utils import MolecularMetrics
-    print("All imports successful")
+    print("✅ All imports successful (SchNet backend)")
 except ImportError as e:
     print(f"Import error: {e}")
-    print("Make sure to install: pip install egnn-pytorch")
+    print("Make sure to install: pip install torch-geometric>=2.2.0")
     sys.exit(1)
 
 warnings.filterwarnings('ignore')
@@ -152,14 +153,15 @@ def check_data_files(config):
     return True
 
 def create_model(config, device):
-    """Create EGNN DDPM molecular model"""
-    print("Creating EGNN DDPM model...")
+    """🎯 UPDATED: Create SchNet DDPM molecular model"""
+    print("Creating SchNet DDPM model...")
     
     try:
-        # Create EGNN Joint2D3D model
-        base_model = create_joint2d3d_egnn_model(
+        # 🎯 UPDATED: Create SchNet Joint2D3D model
+        base_model = create_joint2d3d_schnet_model(
             hidden_dim=config['model']['hidden_dim'],
-            num_layers=config['model']['num_layers']
+            num_layers=config['model']['num_layers'],
+            pocket_selection_strategy=config['model'].get('pocket_selection_strategy', 'adaptive')
         ).to(device)
         
         # Create DDPM
@@ -177,6 +179,7 @@ def create_model(config, device):
         total_params = sum(p.numel() for p in model.parameters())
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         
+        print(f"   Backend: SchNet (continuous-filter convolutions)")
         print(f"   Total parameters: {total_params:,}")
         print(f"   Trainable parameters: {trainable_params:,}")
         print(f"   Model size: {total_params * 4 / 1e6:.1f} MB")
@@ -184,7 +187,7 @@ def create_model(config, device):
         return model, ddpm
         
     except Exception as e:
-        print(f"Error creating model: {e}")
+        print(f"Error creating SchNet model: {e}")
         import traceback
         traceback.print_exc()
         return None, None
@@ -311,7 +314,7 @@ def create_trainer(model, ddpm, config, device):
         return None
 
 def main():
-    parser = argparse.ArgumentParser(description='Train DDPM Joint2D3D EGNN Molecular Generator')
+    parser = argparse.ArgumentParser(description='Train DDPM SchNet Molecular Generator')
     parser.add_argument('--config', type=str, default='config/egnn_training_config.yaml')
     parser.add_argument('--test', action='store_true', help='Quick test mode')
     parser.add_argument('--epochs', type=int, help='Override epochs')
@@ -319,8 +322,9 @@ def main():
     
     args = parser.parse_args()
     
-    print("Joint2D3D EGNN DDPM Molecular Generator Training")
+    print("🎯 SchNet DDPM Molecular Generator Training")
     print("=" * 60)
+    print(f"Backend: SchNet (stable continuous-filter convolutions)")
     print(f"Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
     # Load configuration
@@ -378,7 +382,11 @@ def main():
         return
     
     # Start training
-    print("\nStarting training...")
+    print("\n🚀 Starting SchNet DDPM training...")
+    print("   - Continuous-filter convolutions")
+    print("   - Translation & rotation equivariant")
+    print("   - Stable and well-tested architecture")
+    
     try:
         trainer.train(
             train_loader=train_loader,
@@ -386,7 +394,7 @@ def main():
             num_epochs=config['training']['num_epochs'],
             save_path=str(project_root / config['logging']['save_path'] / "best_model.pth")
         )
-        print("Training completed!")
+        print("🎉 Training completed successfully!")
     except Exception as e:
         print(f"Training failed: {e}")
         import traceback

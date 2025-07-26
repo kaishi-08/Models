@@ -1,4 +1,4 @@
-# src/models/pocket_encoder.py - FIXED API consistency
+# src/models/pocket_encoder.py - UPDATED for SchNet compatibility
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -7,14 +7,39 @@ from torch_geometric.nn.pool import radius_graph
 from torch_geometric.utils import to_dense_batch
 import numpy as np
 
-# Use EGNN from external library
-try:
-    from egnn_pytorch import EGNN
-    EGNN_AVAILABLE = True
-except ImportError:
-    print("Warning: EGNN not available. Install with: pip install egnn-pytorch")
-    EGNN_AVAILABLE = False
-
+# THÊM FUNCTION NÀY NGAY SAU IMPORTS:
+def safe_global_pool(x, batch, pool_type='mean'):
+    """Safe global pooling with CUDA fallback"""
+    try:
+        if pool_type == 'mean':
+            return global_mean_pool(x, batch)
+        else:
+            return global_max_pool(x, batch)
+    except Exception as e:
+        # CPU fallback
+        if x.is_cuda:
+            x_cpu = x.cpu()
+            batch_cpu = batch.cpu()
+            try:
+                if pool_type == 'mean':
+                    result = global_mean_pool(x_cpu, batch_cpu)
+                else:
+                    result = global_max_pool(x_cpu, batch_cpu)
+                return result.cuda()
+            except:
+                pass
+        
+        # Manual pooling fallback
+        unique_batch = torch.unique(batch)
+        pooled = []
+        for b in unique_batch:
+            mask = batch == b
+            if pool_type == 'mean':
+                pooled.append(torch.mean(x[mask], dim=0))
+            else:
+                pooled.append(torch.max(x[mask], dim=0)[0])
+        return torch.stack(pooled)
+    
 class SmartPocketAtomSelector:
     """Smart strategies for selecting important pocket atoms"""
     
@@ -68,7 +93,13 @@ class SmartPocketAtomSelector:
 
 class ImprovedProteinPocketEncoder(nn.Module):
     """
-    🔧 FIXED: Improved pocket encoder with consistent API
+    🎯 UPDATED: Improved pocket encoder - SchNet compatible
+    
+    Key Changes:
+    - Removed EGNN dependency 
+    - Using simple but effective MLPs
+    - Fully compatible with SchNet backend
+    - No unpacking issues
     """
     
     def __init__(self, node_features: int = 8, edge_features: int = 4,
@@ -88,16 +119,31 @@ class ImprovedProteinPocketEncoder(nn.Module):
         # Smart atom selector
         self.atom_selector = SmartPocketAtomSelector()
         
-        # Flexible embeddings
+        # Flexible embeddings for different input dimensions
         self.node_embedding_6d = nn.Linear(6, hidden_dim)
         self.node_embedding_7d = nn.Linear(7, hidden_dim)
         self.node_embedding_8d = nn.Linear(8, hidden_dim)
         
-        # Simple processor (avoid EGNN complexity)
-        self.processor = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
+        # 🎯 UPDATED: Simple but effective processor (no EGNN)
+        self.processor_layers = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(0.1),
+                nn.LayerNorm(hidden_dim)
+            ) for _ in range(num_layers)
+        ])
+        
+        # Position-aware processing (SchNet-style)
+        self.position_mlp = nn.Sequential(
+            nn.Linear(3, hidden_dim // 4),
             nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
+            nn.Linear(hidden_dim // 4, hidden_dim)
+        )
+        
+        # Feature fusion
+        self.feature_fusion = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim)
         )
@@ -113,17 +159,20 @@ class ImprovedProteinPocketEncoder(nn.Module):
         # Layer normalization
         self.layer_norm = nn.LayerNorm(hidden_dim)
         
+        print(f"✅ ImprovedProteinPocketEncoder created (SchNet compatible)")
+        print(f"   Strategy: {selection_strategy}, Max atoms: {max_pocket_atoms}")
+    
     def forward(self, x: torch.Tensor, pos: torch.Tensor, edge_index: torch.Tensor = None,
                 batch: torch.Tensor = None, ligand_pos: torch.Tensor = None):
         """
-        🔧 FIXED: Consistent API forward pass
+        🎯 UPDATED: SchNet-compatible forward pass
         
         Args:
             x: Node features [N, node_features]
             pos: Node positions [N, 3] 
-            edge_index: Edge indices [2, E] (optional, ignored)
+            edge_index: Edge indices [2, E] (optional, mostly ignored)
             batch: Batch indices [N] (optional)
-            ligand_pos: Ligand positions [M, 3] (optional, ignored for now)
+            ligand_pos: Ligand positions [M, 3] (optional, for smart selection)
         """
         
         # Smart atom selection when pocket is too large
@@ -157,17 +206,27 @@ class ImprovedProteinPocketEncoder(nn.Module):
         # Flexible embedding
         h = self._embed_features_flexible(x)
         
-        # Layer normalization
-        h = self.layer_norm(h)
+        # Position encoding (SchNet-style)
+        pos_features = self.position_mlp(pos)
         
-        # Simple processing (no EGNN to avoid API issues)
-        h_processed = self.processor(h)
+        # Combine node and position features
+        h_combined = self.feature_fusion(torch.cat([h, pos_features], dim=-1))
+        
+        # Layer normalization
+        h_normalized = self.layer_norm(h_combined)
+        
+        # 🎯 UPDATED: Process through simple MLP layers (stable)
+        h_processed = h_normalized
+        for layer in self.processor_layers:
+            h_prev = h_processed
+            h_processed = layer(h_processed)
+            h_processed = h_processed + h_prev  # Residual connection
         
         # Global pooling
         if batch is not None:
             try:
-                pocket_mean = global_mean_pool(h_processed, batch)
-                pocket_max = global_max_pool(h_processed, batch)
+                pocket_mean = safe_global_pool(h_processed, batch, 'mean')
+                pocket_max = safe_global_pool(h_processed, batch, 'max')
                 pocket_repr = pocket_mean + pocket_max
             except Exception as e:
                 print(f"Pooling error: {e}")
@@ -212,11 +271,13 @@ class ImprovedProteinPocketEncoder(nn.Module):
                 return self.node_embedding_7d(x_truncated.float())
 
 
-# Factory function
+# 🎯 UPDATED: Factory function for SchNet compatibility
 def create_improved_pocket_encoder(hidden_dim: int = 256, output_dim: int = 256, 
                                  selection_strategy: str = "adaptive"):
     """
-    🔧 FIXED: Create improved pocket encoder - simplified version
+    🎯 UPDATED: Create improved pocket encoder - SchNet compatible version
+    
+    No EGNN dependencies, fully compatible with SchNet backend
     """
     
     return ImprovedProteinPocketEncoder(
@@ -227,10 +288,31 @@ def create_improved_pocket_encoder(hidden_dim: int = 256, output_dim: int = 256,
     )
 
 
+# 🎯 Simple pocket encoder for basic usage
+class SimplePocketEncoder(nn.Module):
+    """Simple pocket encoder - most basic version"""
+    
+    def __init__(self, input_dim: int = 7, hidden_dim: int = 256, output_dim: int = 256):
+        super().__init__()
+        
+        self.encoder = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, output_dim)
+        )
+    
+    def forward(self, x: torch.Tensor, pos: torch.Tensor = None, **kwargs):
+        # Simple mean pooling over pocket atoms
+        pocket_features = torch.mean(x, dim=0, keepdim=True)
+        return self.encoder(pocket_features)
+
+
 # Test function
 def test_improved_pocket_encoder():
     """Test the pocket encoder"""
-    print("Testing Improved Pocket Encoder...")
+    print("Testing Improved Pocket Encoder (SchNet compatible)...")
     
     # Create test data
     num_residues = 500
@@ -255,23 +337,25 @@ def test_improved_pocket_encoder():
         
         print(f"   Input: {num_residues} residues")
         print(f"   Output: {pocket_repr.shape}")
-        print(f"   Success: Simplified pocket processing")
+        print(f"   ✅ Success: SchNet-compatible pocket processing")
         
         return True
         
     except Exception as e:
-        print(f"   Error: {e}")
+        print(f"   ❌ Error: {e}")
         return False
 
 
 if __name__ == "__main__":
-    print("Improved Pocket Encoder - FIXED API VERSION")
+    print("🎯 Improved Pocket Encoder - SchNet Compatible Version")
     print("=" * 60)
     print("Features:")
+    print("- No EGNN dependencies (removed)")
+    print("- Simple but effective MLP processing")
     print("- Smart atom selection")
-    print("- Simplified processing (no EGNN)")
-    print("- Consistent API")
+    print("- Position-aware encoding")
     print("- Flexible input dimensions")
+    print("- Full SchNet compatibility")
     print()
     
     test_improved_pocket_encoder()
