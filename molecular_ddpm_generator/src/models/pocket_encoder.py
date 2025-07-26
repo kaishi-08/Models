@@ -2,7 +2,8 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.nn import global_mean_pool, global_max_pool, knn_graph, radius_graph
+from torch_geometric.nn import global_mean_pool, global_max_pool, knn_graph
+from torch_geometric.nn.pool import radius_graph
 from torch_geometric.utils import to_dense_batch
 import numpy as np
 

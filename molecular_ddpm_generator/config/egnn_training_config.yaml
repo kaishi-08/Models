@@ -1,9 +1,9 @@
 # config/egnn_training_config.yaml - Updated for Joint2D3D + ImprovedPocketEncoder
 # Data configuration
 data:
-  train_path: "data/processed/train_generation.pkl"
-  val_path: "data/processed/test_generation.pkl"
-  test_path: "data/processed/test_generation.pkl"
+  train_path: "data/processed_full/train_generation.pkl"
+  val_path: "data/processed_full/test_generation.pkl"
+  test_path: "data/processed_full/test_generation.pkl"
   batch_size: 16
   num_workers: 4
   pin_memory: true

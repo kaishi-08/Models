@@ -2,7 +2,8 @@
 import torch
 import torch.nn as nn
 from torch_geometric.nn import global_mean_pool, global_max_pool, SchNet, DimeNet
-from torch_geometric.utils import to_dense_batch, radius_graph
+from torch_geometric.utils import to_dense_batch
+from torch_geometric.nn.pool import radius_graph
 from .base_model import MolecularModel
 
 # 🔄 ONLY CHANGE: Import improved pocket encoder
