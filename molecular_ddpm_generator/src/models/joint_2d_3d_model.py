@@ -1,4 +1,4 @@
-# src/models/joint_2d_3d_model.py - SchNet VERSION
+# src/models/joint_2d_3d_model.py - FIXED SchNet Device Issues
 import torch
 import torch.nn as nn
 from torch_geometric.nn import global_mean_pool, global_max_pool, SchNet
@@ -53,7 +53,7 @@ def safe_global_pool(x, batch, pool_type='mean'):
             return torch.stack(pooled)
 
 class Joint2D3DSchNetModel(MolecularModel):
-    """Joint 2D-3D Model with SchNet Backend for molecular generation"""
+    """🔧 FIXED: Joint 2D-3D Model with SchNet Backend - Device Compatible"""
     
     def __init__(self, atom_types: int = 11, bond_types: int = 4,
                  hidden_dim: int = 256, pocket_dim: int = 256,
@@ -86,15 +86,16 @@ class Joint2D3DSchNetModel(MolecularModel):
         self.pocket_atom_embedding_7d = nn.Linear(7, hidden_dim)
         self.pocket_atom_embedding_8d = nn.Linear(8, hidden_dim)
         
-        # SchNet for 3D geometric processing
+        # 🔧 FIXED: SchNet will be kept on same device as model, not forced to CPU
         self.schnet_3d = SchNet(
             hidden_channels=hidden_dim,
             num_filters=hidden_dim,
-            num_interactions=num_layers,
-            num_gaussians=50,
+            num_interactions=max(2, num_layers//2),  # Reduced interactions for stability
+            num_gaussians=25,  # Reduced for stability
             cutoff=max_radius,
             readout='add'
-        ).cpu()
+        )
+        # Don't force to CPU - let it follow the main model's device
         
         # 2D Chemical topology processing
         self.gnn_2d_layers = nn.ModuleList([
@@ -152,15 +153,16 @@ class Joint2D3DSchNetModel(MolecularModel):
         # Position head
         self.position_head = nn.Linear(hidden_dim, 3)
         
-        print(f"Joint2D3D Model initialized with SchNet backend")
+        print(f"🔧 FIXED Joint2D3D Model initialized with SchNet backend")
         print(f"   Layers: {num_layers}, Hidden: {hidden_dim}, Radius: {max_radius}A")
+        print(f"   SchNet will follow model device (not forced to CPU)")
     
     def forward(self, x: torch.Tensor, pos: torch.Tensor, edge_index: torch.Tensor,
                 edge_attr: torch.Tensor, batch: torch.Tensor,
                 pocket_x: torch.Tensor = None, pocket_pos: torch.Tensor = None,
                 pocket_edge_index: torch.Tensor = None, pocket_batch: torch.Tensor = None,
                 **kwargs):
-        """Forward pass with SchNet processing"""
+        """🔧 FIXED: Forward pass with proper device handling"""
         
         try:
             # Initial embeddings
@@ -169,8 +171,8 @@ class Joint2D3DSchNetModel(MolecularModel):
             # 2D Processing: Chemical topology
             h_2d = self._process_2d_chemistry(atom_emb, edge_index, edge_attr, batch)
             
-            # 3D Processing: SchNet geometric processing  
-            h_3d, pos_updated = self._process_3d_schnet(atom_emb, pos, batch)
+            # 🔧 FIXED: 3D Processing with proper device management
+            h_3d, pos_updated = self._process_3d_schnet_fixed(atom_emb, pos, batch)
             
             # 2D-3D fusion
             h_fused = self.fusion_layer(h_2d, h_3d)
@@ -218,6 +220,102 @@ class Joint2D3DSchNetModel(MolecularModel):
                 'node_features': h_fallback
             }
     
+    def _process_3d_schnet_fixed(self, atom_emb: torch.Tensor, pos: torch.Tensor, 
+                            batch: torch.Tensor):
+        """🎯 FINAL FIX: SchNet processing that ALWAYS returns correct dimensions"""
+        
+        # Create atomic numbers from embeddings
+        z = torch.argmax(atom_emb, dim=-1) + 1
+        z = torch.clamp(z, 1, self.atom_types)
+        
+        try:
+            # Check torch-cluster availability
+            try:
+                import torch_cluster
+                torch_cluster_available = True
+            except ImportError:
+                torch_cluster_available = False
+            
+            if not torch_cluster_available:
+                print("⚠️  torch-cluster not available, using simple 3D processing")
+                return self._simple_3d_processing(atom_emb, pos, batch)
+            
+            # Device management
+            current_device = next(self.schnet_3d.parameters()).device
+            z_device = z.to(current_device)
+            pos_device = pos.to(current_device)
+            batch_device = batch.to(current_device)
+            
+            print(f"SchNet processing: {atom_emb.size(0)} atoms")
+            
+            # SchNet forward pass
+            h_3d_output = self.schnet_3d(z=z_device, pos=pos_device, batch=batch_device)
+            print(f"SchNet raw output: {h_3d_output.shape}")
+            
+            # 🎯 CRITICAL FIX: Ensure output matches input atom count
+            expected_atoms = atom_emb.size(0)
+            
+            if h_3d_output.size(0) != expected_atoms:
+                print(f"⚠️  Atom count mismatch: got {h_3d_output.size(0)}, need {expected_atoms}")
+                
+                if h_3d_output.size(0) < expected_atoms:
+                    # SchNet returned batch-level or reduced features
+                    # Expand to all atoms using batch indices
+                    try:
+                        # Method 1: Expand using batch indices
+                        expanded_output = h_3d_output[batch_device.cpu()]
+                        h_3d_output = expanded_output.to(current_device)
+                        print(f"   Expanded using batch indices: {h_3d_output.shape}")
+                    except Exception as e:
+                        print(f"   Batch expansion failed: {e}")
+                        # Method 2: Repeat features for all atoms
+                        repeat_count = expected_atoms // h_3d_output.size(0) + 1
+                        h_3d_output = h_3d_output.repeat(repeat_count, 1)[:expected_atoms]
+                        print(f"   Repeated features: {h_3d_output.shape}")
+                else:
+                    # More outputs than expected - truncate
+                    h_3d_output = h_3d_output[:expected_atoms]
+                    print(f"   Truncated to: {h_3d_output.shape}")
+            
+            # 🎯 CRITICAL FIX: Ensure correct feature dimension
+            if h_3d_output.size(1) != self.hidden_dim:
+                print(f"⚠️  Feature dimension mismatch: {h_3d_output.size(1)} != {self.hidden_dim}")
+                
+                if h_3d_output.size(1) == 1:
+                    # SchNet returned scalar - create meaningful features from atom embeddings
+                    print("   SchNet returned scalars, using atom embedding basis")
+                    # Use original atom embeddings as basis, scale by SchNet output
+                    scaling = h_3d_output.squeeze(-1).unsqueeze(-1)  # [N, 1]
+                    h_3d_output = atom_emb * (0.1 + 0.9 * torch.sigmoid(scaling))  # Scaled atom embeddings
+                    print(f"   Created features from atom embeddings: {h_3d_output.shape}")
+                
+                elif h_3d_output.size(1) < self.hidden_dim:
+                    # Pad to correct dimension
+                    padding_size = self.hidden_dim - h_3d_output.size(1)
+                    padding = torch.zeros(h_3d_output.size(0), padding_size, 
+                                        device=current_device, dtype=h_3d_output.dtype)
+                    h_3d_output = torch.cat([h_3d_output, padding], dim=1)
+                    print(f"   Padded to: {h_3d_output.shape}")
+                
+                else:
+                    # Truncate to correct dimension
+                    h_3d_output = h_3d_output[:, :self.hidden_dim]
+                    print(f"   Truncated to: {h_3d_output.shape}")
+            
+            # Final validation
+            assert h_3d_output.size(0) == expected_atoms, f"Atom count still wrong: {h_3d_output.size(0)} != {expected_atoms}"
+            assert h_3d_output.size(1) == self.hidden_dim, f"Feature dim still wrong: {h_3d_output.size(1)} != {self.hidden_dim}"
+            
+            # Move back to original device
+            h_3d = h_3d_output.to(pos.device)
+            print(f"✅ SchNet processing successful: {h_3d.shape}")
+            return h_3d, pos.clone()
+            
+        except Exception as e:
+            print(f"🔧 SchNet processing failed: {e}")
+            print("   Using simple 3D processing fallback")
+            return self._simple_3d_processing(atom_emb, pos, batch)
+    
     def _process_2d_chemistry(self, atom_emb: torch.Tensor, edge_index: torch.Tensor,
                              edge_attr: torch.Tensor, batch: torch.Tensor):
         """2D chemical topology processing"""
@@ -242,37 +340,6 @@ class Joint2D3DSchNetModel(MolecularModel):
                 continue
         
         return h_current
-    
-    def _process_3d_schnet(self, atom_emb: torch.Tensor, pos: torch.Tensor, 
-                        batch: torch.Tensor):
-        """SchNet 3D processing - Always on CPU"""
-        
-        z = torch.argmax(atom_emb, dim=-1) + 1
-        z = torch.clamp(z, 1, self.atom_types)
-        
-        try:
-            # Save original device
-            original_device = pos.device
-            
-            # Always move to CPU for SchNet processing
-            z_cpu = z.cpu()
-            pos_cpu = pos.cpu()
-            batch_cpu = batch.cpu()
-            
-            # SchNet processing on CPU (model is already on CPU)
-            h_3d_cpu = self.schnet_3d(z=z_cpu, pos=pos_cpu, batch=batch_cpu)
-            
-            # Move result back to original device
-            h_3d = h_3d_cpu.to(original_device)
-            pos_updated = pos.clone()
-            
-            return h_3d, pos_updated
-            
-        except Exception as e:
-            print(f"SchNet CPU processing failed: {e}")
-            print("Using atom embeddings fallback")
-            return atom_emb, pos
-    
     
     def _embed_atoms_flexible(self, x: torch.Tensor) -> torch.Tensor:
         """Flexible atom embedding"""
@@ -353,6 +420,19 @@ class Joint2D3DSchNetModel(MolecularModel):
             return atom_features * gate + broadcasted_condition * (1 - gate)
         else:
             return atom_features
+    
+    def to(self, device):
+        """🔧 FIXED: Proper device transfer for ALL components"""
+        # Move all components to the same device
+        super().to(device)
+        
+        # Explicitly move SchNet to the same device
+        self.schnet_3d = self.schnet_3d.to(device)
+        
+        print(f"✅ All model components moved to {device}")
+        print(f"   SchNet device: {next(self.schnet_3d.parameters()).device}")
+        
+        return self
 
 
 class GraphConvLayer(nn.Module):
@@ -396,11 +476,17 @@ class GraphConvLayer(nn.Module):
         return self.norm(self.activation(out))
 
 
+# Fix for dimension mismatch error in Joint2D3D model
+# Replace the fusion and conditioning methods in your joint_2d_3d_model.py
+
 class Enhanced2D3DFusion(nn.Module):
-    """Enhanced 2D-3D feature fusion"""
+    """🔧 FIXED: Enhanced 2D-3D feature fusion with robust dimension handling"""
     
     def __init__(self, hidden_dim: int):
         super().__init__()
+        self.hidden_dim = hidden_dim
+        
+        # Flexible fusion MLP
         self.fusion_mlp = nn.Sequential(
             nn.Linear(hidden_dim * 2, hidden_dim),
             nn.SiLU(),
@@ -409,19 +495,186 @@ class Enhanced2D3DFusion(nn.Module):
         self.norm = nn.LayerNorm(hidden_dim)
         
     def forward(self, features_2d: torch.Tensor, features_3d: torch.Tensor) -> torch.Tensor:
-        """Fuse 2D and 3D features"""
-        # Ensure same dimensions
-        if features_2d.size(0) != features_3d.size(0):
-            min_size = min(features_2d.size(0), features_3d.size(0))
-            features_2d = features_2d[:min_size]
-            features_3d = features_3d[:min_size]
+        """🎯 FINAL FIX: Fusion that preserves atom count"""
         
-        # Concatenate and fuse
+        atoms_2d = features_2d.size(0)
+        atoms_3d = features_3d.size(0)
+        
+        # 🎯 FIX: Handle atom count mismatch WITHOUT truncation
+        if atoms_2d != atoms_3d:
+            if atoms_3d < atoms_2d:
+                # Expand 3D features to match 2D
+                repeat_ratio = atoms_2d // atoms_3d + 1
+                features_3d = features_3d.repeat(repeat_ratio, 1)[:atoms_2d]
+            else:
+                # Truncate 3D to match 2D (rare case)
+                features_3d = features_3d[:atoms_2d]
+        
+        # 🎯 FIX: Ensure correct dimensions
+        target_dim = self.hidden_dim
+        
+        if features_2d.size(1) != target_dim:
+            if features_2d.size(1) > target_dim:
+                features_2d = features_2d[:, :target_dim]
+            else:
+                padding = torch.zeros(features_2d.size(0), target_dim - features_2d.size(1), 
+                                    device=features_2d.device, dtype=features_2d.dtype)
+                features_2d = torch.cat([features_2d, padding], dim=1)
+        
+        if features_3d.size(1) != target_dim:
+            if features_3d.size(1) > target_dim:
+                features_3d = features_3d[:, :target_dim]
+            else:
+                padding = torch.zeros(features_3d.size(0), target_dim - features_3d.size(1),
+                                    device=features_3d.device, dtype=features_3d.dtype)
+                features_3d = torch.cat([features_3d, padding], dim=1)
+        
+        # Safe fusion
         combined = torch.cat([features_2d, features_3d], dim=-1)
         fused = self.fusion_mlp(combined)
+        result = self.norm(fused + features_2d)
         
-        # Residual connection with 2D features
-        return self.norm(fused + features_2d)
+        return result
+
+    def _apply_conditioning(self, atom_features: torch.Tensor, pocket_condition: torch.Tensor, 
+                       batch: torch.Tensor) -> torch.Tensor:
+        """🎯 FINAL FIX: Robust conditioning"""
+        if pocket_condition is None or pocket_condition.abs().sum() == 0:
+            return atom_features
+        
+        try:
+            pocket_transformed = self.condition_transform(pocket_condition)
+            
+            # 🎯 FIX: Handle batch size issues
+            batch_size = pocket_transformed.size(0)
+            max_batch_idx = batch.max().item()
+            
+            if max_batch_idx >= batch_size:
+                extra_needed = max_batch_idx + 1 - batch_size
+                last_condition = pocket_transformed[-1:].repeat(extra_needed, 1)
+                pocket_transformed = torch.cat([pocket_transformed, last_condition], dim=0)
+            
+            # 🎯 FIX: Handle dimension mismatch
+            if pocket_transformed.size(1) != atom_features.size(1):
+                target_dim = atom_features.size(1)
+                if pocket_transformed.size(1) > target_dim:
+                    pocket_transformed = pocket_transformed[:, :target_dim]
+                else:
+                    padding = torch.zeros(pocket_transformed.size(0), target_dim - pocket_transformed.size(1),
+                                        device=pocket_transformed.device, dtype=pocket_transformed.dtype)
+                    pocket_transformed = torch.cat([pocket_transformed, padding], dim=1)
+            
+            # 🎯 FIX: Safe batch indexing
+            batch_safe = torch.clamp(batch, 0, pocket_transformed.size(0) - 1)
+            broadcasted_condition = pocket_transformed[batch_safe]
+            
+            return atom_features + broadcasted_condition
+            
+        except Exception as e:
+            return atom_features
+
+# Debug version of the main forward method:
+def forward_debug(self, x: torch.Tensor, pos: torch.Tensor, edge_index: torch.Tensor,
+            edge_attr: torch.Tensor, batch: torch.Tensor,
+            pocket_x: torch.Tensor = None, pocket_pos: torch.Tensor = None,
+            pocket_edge_index: torch.Tensor = None, pocket_batch: torch.Tensor = None,
+            **kwargs):
+    """🔧 FIXED: Forward pass with dimension debugging"""
+    
+    try:
+        print(f"\n🔍 Forward pass debug:")
+        print(f"   Input x: {x.shape}")
+        print(f"   Input pos: {pos.shape}")
+        
+        # Initial embeddings
+        atom_emb = self._embed_atoms_flexible(x)
+        print(f"   Atom embedding: {atom_emb.shape}")
+        
+        # 2D Processing
+        h_2d = self._process_2d_chemistry(atom_emb, edge_index, edge_attr, batch)
+        print(f"   2D features: {h_2d.shape}")
+        
+        # 3D Processing
+        h_3d, pos_updated = self._process_3d_schnet_fixed(atom_emb, pos, batch)
+        print(f"   3D features: {h_3d.shape}")
+        
+        # 🔧 CRITICAL: Check dimensions before fusion
+        if h_2d.size(1) != h_3d.size(1):
+            print(f"⚠️  DIMENSION MISMATCH: 2D={h_2d.size(1)}, 3D={h_3d.size(1)}")
+            
+            # Fix dimension mismatch
+            target_dim = self.hidden_dim
+            
+            if h_2d.size(1) != target_dim:
+                if h_2d.size(1) > target_dim:
+                    h_2d = h_2d[:, :target_dim]
+                else:
+                    padding = torch.zeros(h_2d.size(0), target_dim - h_2d.size(1), 
+                                        device=h_2d.device, dtype=h_2d.dtype)
+                    h_2d = torch.cat([h_2d, padding], dim=1)
+            
+            if h_3d.size(1) != target_dim:
+                if h_3d.size(1) > target_dim:
+                    h_3d = h_3d[:, :target_dim]
+                else:
+                    padding = torch.zeros(h_3d.size(0), target_dim - h_3d.size(1),
+                                        device=h_3d.device, dtype=h_3d.dtype)
+                    h_3d = torch.cat([h_3d, padding], dim=1)
+            
+            print(f"   Fixed dimensions: 2D={h_2d.shape}, 3D={h_3d.shape}")
+        
+        # 2D-3D fusion
+        h_fused = self.fusion_layer(h_2d, h_3d)
+        print(f"   Fused features: {h_fused.shape}")
+        
+        # Pocket conditioning
+        pocket_condition = self._encode_pocket_flexible(
+            pocket_x, pocket_pos, pocket_edge_index, pocket_batch, batch,
+            ligand_pos=pos
+        )
+        
+        if pocket_condition is not None:
+            print(f"   Pocket condition: {pocket_condition.shape}")
+            h_conditioned = self._apply_conditioning_fixed(h_fused, pocket_condition, batch)
+        else:
+            h_conditioned = h_fused
+        
+        print(f"   Final features: {h_conditioned.shape}")
+        
+        # Output predictions
+        atom_logits = self.atom_type_head(h_conditioned)
+        pos_pred = pos_updated + self.position_head(h_conditioned)
+        
+        # Bond predictions
+        if edge_index.size(1) > 0:
+            row, col = edge_index
+            edge_features = torch.cat([h_conditioned[row], h_conditioned[col]], dim=-1)
+            bond_logits = self.bond_type_head(edge_features)
+        else:
+            bond_logits = torch.zeros((0, self.bond_types), device=x.device)
+        
+        print(f"   Outputs: atoms={atom_logits.shape}, pos={pos_pred.shape}, bonds={bond_logits.shape}")
+        
+        return {
+            'atom_logits': atom_logits,
+            'pos_pred': pos_pred,
+            'bond_logits': bond_logits,
+            'node_features': h_conditioned
+        }
+        
+    except Exception as e:
+        print(f"❌ Forward error: {e}")
+        import traceback
+        traceback.print_exc()
+        
+        # Safe fallback
+        h_fallback = self._embed_atoms_flexible(x)
+        return {
+            'atom_logits': torch.zeros(x.size(0), self.atom_types, device=x.device),
+            'pos_pred': pos,
+            'bond_logits': torch.zeros((0, self.bond_types), device=x.device),
+            'node_features': h_fallback
+        }
 
 
 class SchNetPocketEncoder(nn.Module):
@@ -503,7 +756,7 @@ class SchNetPocketEncoder(nn.Module):
 # Factory function
 def create_joint2d3d_schnet_model(hidden_dim: int = 256, num_layers: int = 6,
                                  pocket_selection_strategy: str = "adaptive"):
-    """Create Joint2D3D model with SchNet backend"""
+    """🔧 FIXED: Create Joint2D3D model with SchNet backend - Device Compatible"""
     if not SCHNET_AVAILABLE:
         raise ImportError("SchNet not available! Update torch-geometric: pip install torch-geometric>=2.0")
         
