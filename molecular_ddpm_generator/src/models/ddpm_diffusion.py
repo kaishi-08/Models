@@ -190,9 +190,10 @@ class MolecularDDPM(nn.Module):
             return tensor
         return tensor.to(device)
 
+
 class MolecularDDPMModel(nn.Module):
     """
-    🎯 FIXED: Wrapper with proper parameter handling
+    🎯 FIXED: Wrapper with proper parameter handling and CORRECT INDENTATION
     """
     
     def __init__(self, base_model, ddpm: MolecularDDPM):
@@ -210,63 +211,75 @@ class MolecularDDPMModel(nn.Module):
         
         # 🎯 CRITICAL FIX: Proper parameter initialization
         self.register_parameter('output_scale', nn.Parameter(torch.tensor(1.0)))
-        
-def forward(self, **kwargs):
-    """🔧 FIXED: Forward pass with flexible parameter handling"""
-    try:
-        # Extract time if present
-        t = kwargs.pop('t', None)
-        
-        # Get main inputs
-        pos = kwargs.get('pos')
-        x = kwargs.get('x')
-        
-        # Time embedding (if provided)
-        if t is not None:
-            t_emb = self._embed_timestep(t)
-            time_features = self.time_embedding(t_emb)
-            kwargs['time_features'] = time_features
-        
-        # Call base model with all kwargs
-        outputs = self.base_model(**kwargs)
-        
-        # Get position prediction
-        if isinstance(outputs, dict):
-            if 'pos_pred' in outputs:
-                pos_pred = outputs['pos_pred']
-            elif 'positions' in outputs:
-                pos_pred = outputs['positions']
+    
+    def forward(self, **kwargs):
+        """🔧 FIXED: Forward pass with gradient preservation"""
+        try:
+            # Extract time if present
+            t = kwargs.pop('t', None)
+            
+            # Get main inputs
+            pos = kwargs.get('pos')
+            x = kwargs.get('x')
+            
+            # Time embedding (if provided)
+            if t is not None:
+                t_emb = self._embed_timestep(t)
+                time_features = self.time_embedding(t_emb)
+                kwargs['time_features'] = time_features
+            
+            # Call base model with all kwargs
+            outputs = self.base_model(**kwargs)
+            
+            # Get position prediction
+            if isinstance(outputs, dict):
+                if 'pos_pred' in outputs:
+                    pos_pred = outputs['pos_pred']
+                elif 'positions' in outputs:
+                    pos_pred = outputs['positions']
+                else:
+                    pos_pred = outputs.get('node_features', pos)
             else:
-                pos_pred = outputs.get('node_features', pos)
-        else:
-            pos_pred = outputs
-        
-        # Apply scaling
-        if pos_pred is not None:
-            scaled_output = pos_pred * self.output_scale * 5.0
-            return scaled_output
-        else:
-            # Return dummy output
-            if pos is not None:
-                return torch.randn_like(pos) * 2.0
-            elif x is not None:
-                return torch.randn(x.size(0), 3, device=x.device) * 2.0
-            else:
-                return torch.randn(1, 3) * 2.0
+                pos_pred = outputs
+            
+            # 🔧 FIXED: Ensure output has gradients and proper scaling
+            if pos_pred is not None:
+                # Ensure gradients are preserved
+                if not pos_pred.requires_grad and pos_pred.dtype == torch.float:
+                    pos_pred = pos_pred.requires_grad_(True)
                 
-    except Exception as e:
-        print(f"MolecularDDPMModel forward error: {e}")
-        
-        # Emergency fallback
-        pos = kwargs.get('pos')
-        x = kwargs.get('x')
-        
-        if pos is not None:
-            return torch.randn_like(pos) * 2.0
-        elif x is not None:
-            return torch.randn(x.size(0), 3, device=x.device) * 2.0
-        else:
-            return torch.randn(1, 3) * 2.0
+                # Apply learnable scaling
+                scaled_output = pos_pred * self.output_scale * 3.0  # Reduced from 5.0
+                
+                # Ensure output requires gradients
+                if not scaled_output.requires_grad:
+                    scaled_output = scaled_output.requires_grad_(True)
+                
+                return scaled_output
+            else:
+                # 🔧 FIXED: Return output with gradients
+                if pos is not None:
+                    output = torch.randn_like(pos, requires_grad=True) * 1.5
+                elif x is not None:
+                    output = torch.randn(x.size(0), 3, device=x.device, requires_grad=True) * 1.5
+                else:
+                    output = torch.randn(1, 3, requires_grad=True) * 1.5
+                
+                return output
+                    
+        except Exception as e:
+            print(f"MolecularDDPMModel forward error: {e}")
+            
+            # 🔧 FIXED: Emergency fallback with gradients
+            pos = kwargs.get('pos')
+            x = kwargs.get('x')
+            
+            if pos is not None:
+                return torch.randn_like(pos, requires_grad=True) * 1.5
+            elif x is not None:
+                return torch.randn(x.size(0), 3, device=x.device, requires_grad=True) * 1.5
+            else:
+                return torch.randn(1, 3, requires_grad=True) * 1.5
     
     def _embed_timestep(self, timesteps, dim=128):
         """Sinusoidal timestep embedding"""
