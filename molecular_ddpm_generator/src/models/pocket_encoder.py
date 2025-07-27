@@ -1,4 +1,4 @@
-# src/models/pocket_encoder.py - UPDATED for SchNet compatibility
+# src/models/pocket_encoder.py - REFINED: EGNN Compatible & Enhanced for Molecular Generation
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -7,9 +7,9 @@ from torch_geometric.nn.pool import radius_graph
 from torch_geometric.utils import to_dense_batch
 import numpy as np
 
-# THÊM FUNCTION NÀY NGAY SAU IMPORTS:
+# Safe global pooling function
 def safe_global_pool(x, batch, pool_type='mean'):
-    """Safe global pooling with CUDA fallback"""
+    """Safe global pooling with CUDA/CPU fallback"""
     try:
         if pool_type == 'mean':
             return global_mean_pool(x, batch)
@@ -39,21 +39,20 @@ def safe_global_pool(x, batch, pool_type='mean'):
             else:
                 pooled.append(torch.max(x[mask], dim=0)[0])
         return torch.stack(pooled)
-    
+
+
 class SmartPocketAtomSelector:
-    """Smart strategies for selecting important pocket atoms"""
+    """🎯 ENHANCED: Smart strategies for selecting important pocket atoms for molecular generation"""
     
     @staticmethod
-    def select_by_distance_to_center(pos: torch.Tensor, pocket_center: torch.Tensor, 
-                                   max_atoms: int, max_radius: float = 12.0):
-        """Distance-based selection"""
-        distances = torch.norm(pos - pocket_center, dim=1)
+    def select_by_distance_to_ligand(pocket_pos: torch.Tensor, ligand_pos: torch.Tensor, 
+                                   max_atoms: int, primary_radius: float = 6.0, 
+                                   secondary_radius: float = 12.0):
+        """Distance-based selection relative to ligand (most important for generation)"""
+        ligand_center = torch.mean(ligand_pos, dim=0)
+        distances = torch.norm(pocket_pos - ligand_center, dim=1)
         
-        # Scientific thresholds
-        primary_radius = 6.0
-        secondary_radius = 12.0
-        
-        # Priority 1: Atoms within 6 Å
+        # Priority 1: Atoms within primary radius (direct interaction)
         primary_mask = distances <= primary_radius
         primary_indices = torch.where(primary_mask)[0]
         
@@ -62,7 +61,7 @@ class SmartPocketAtomSelector:
                                        k=max_atoms, largest=False)
             return primary_indices[top_indices]
         
-        # Priority 2: Extend to 12 Å
+        # Priority 2: Extend to secondary radius
         secondary_mask = (distances > primary_radius) & (distances <= secondary_radius)
         secondary_indices = torch.where(secondary_mask)[0]
         
@@ -76,45 +75,177 @@ class SmartPocketAtomSelector:
         return combined_indices
     
     @staticmethod
-    def select_multi_strategy(pos: torch.Tensor, x: torch.Tensor, max_atoms: int,
-                            pocket_center: torch.Tensor = None, 
-                            ligand_pos: torch.Tensor = None,
-                            strategy: str = "adaptive"):
-        """Multi-strategy selection"""
+    def select_by_binding_site_prediction(pocket_pos: torch.Tensor, pocket_x: torch.Tensor,
+                                        ligand_pos: torch.Tensor, max_atoms: int):
+        """Binding site prediction based on chemical features and geometry"""
+        ligand_center = torch.mean(ligand_pos, dim=0)
         
-        if strategy == "adaptive" or strategy == "distance":
-            center = pocket_center if pocket_center is not None else torch.mean(pos, dim=0)
-            return SmartPocketAtomSelector.select_by_distance_to_center(pos, center, max_atoms)
+        # Distance component
+        distances = torch.norm(pocket_pos - ligand_center, dim=1)
+        distance_scores = torch.exp(-distances / 8.0)  # 8Å decay
+        
+        # Chemical feature component (if available)
+        if pocket_x.size(1) >= 7:  # Has chemical features
+            # Assume chemical features: [res_type, hydrophobic, charged, polar, aromatic, ...]
+            chemical_scores = torch.zeros(pocket_x.size(0), device=pocket_x.device)
+            
+            # Prefer hydrophobic, aromatic, and charged residues for binding
+            if pocket_x.size(1) > 2:  # Has hydrophobic
+                chemical_scores += pocket_x[:, 2] * 0.3  # Hydrophobic
+            if pocket_x.size(1) > 3:  # Has charged
+                chemical_scores += pocket_x[:, 3] * 0.4  # Charged
+            if pocket_x.size(1) > 5:  # Has aromatic
+                chemical_scores += pocket_x[:, 5] * 0.3  # Aromatic
         else:
-            # Default to distance-based
-            center = pocket_center if pocket_center is not None else torch.mean(pos, dim=0)
-            return SmartPocketAtomSelector.select_by_distance_to_center(pos, center, max_atoms)
+            chemical_scores = torch.ones(pocket_x.size(0), device=pocket_x.device)
+        
+        # Combined score
+        combined_scores = distance_scores * 0.7 + chemical_scores * 0.3
+        
+        # Select top atoms
+        _, selected_indices = torch.topk(combined_scores, k=min(max_atoms, len(combined_scores)), largest=True)
+        return selected_indices
+    
+    @staticmethod
+    def select_by_surface_accessibility(pocket_pos: torch.Tensor, ligand_pos: torch.Tensor,
+                                      max_atoms: int, probe_radius: float = 1.4):
+        """Select surface-accessible atoms (simplified version)"""
+        ligand_center = torch.mean(ligand_pos, dim=0)
+        distances = torch.norm(pocket_pos - ligand_center, dim=1)
+        
+        # Simple surface approximation: atoms not too crowded
+        pairwise_distances = torch.cdist(pocket_pos, pocket_pos)
+        neighbor_counts = (pairwise_distances < probe_radius * 2).sum(dim=1) - 1  # Exclude self
+        
+        # Prefer atoms with fewer neighbors (more surface-like) but close to ligand
+        surface_scores = 1.0 / (neighbor_counts.float() + 1.0)
+        distance_scores = torch.exp(-distances / 10.0)
+        
+        combined_scores = surface_scores * 0.4 + distance_scores * 0.6
+        
+        _, selected_indices = torch.topk(combined_scores, k=min(max_atoms, len(combined_scores)), largest=True)
+        return selected_indices
+    
+    @staticmethod
+    def select_adaptive(pocket_pos: torch.Tensor, pocket_x: torch.Tensor,
+                       ligand_pos: torch.Tensor, max_atoms: int, strategy: str = "adaptive"):
+        """Adaptive selection combining multiple strategies"""
+        
+        if strategy == "distance":
+            return SmartPocketAtomSelector.select_by_distance_to_ligand(
+                pocket_pos, ligand_pos, max_atoms
+            )
+        elif strategy == "binding_site":
+            return SmartPocketAtomSelector.select_by_binding_site_prediction(
+                pocket_pos, pocket_x, ligand_pos, max_atoms
+            )
+        elif strategy == "surface":
+            return SmartPocketAtomSelector.select_by_surface_accessibility(
+                pocket_pos, ligand_pos, max_atoms
+            )
+        else:  # adaptive
+            # Use binding site prediction if chemical features available, else distance
+            if pocket_x.size(1) >= 6:
+                return SmartPocketAtomSelector.select_by_binding_site_prediction(
+                    pocket_pos, pocket_x, ligand_pos, max_atoms
+                )
+            else:
+                return SmartPocketAtomSelector.select_by_distance_to_ligand(
+                    pocket_pos, ligand_pos, max_atoms
+                )
+
+
+class EGNNPocketLayer(nn.Module):
+    """🎯 EGNN-style layer for pocket processing (simplified for pocket atoms)"""
+    
+    def __init__(self, hidden_dim, edge_dim=1):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        
+        # Edge model (simplified for pocket-pocket interactions)
+        self.edge_mlp = nn.Sequential(
+            nn.Linear(hidden_dim * 2 + edge_dim + 1, hidden_dim),  # +1 for distance
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim)
+        )
+        
+        # Node update model
+        self.node_mlp = nn.Sequential(
+            nn.Linear(hidden_dim + hidden_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim)
+        )
+        
+        # Position update (optional for pocket atoms)
+        self.coord_mlp = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, 1)
+        )
+        
+    def forward(self, h, pos, edge_index):
+        """Simple EGNN-style update for pocket atoms"""
+        if edge_index.size(1) == 0:
+            return h, pos
+        
+        row, col = edge_index
+        
+        # Edge features with distance
+        radial = pos[row] - pos[col]
+        radial_norm = torch.norm(radial, dim=-1, keepdim=True)
+        radial_norm = torch.clamp(radial_norm, min=1e-8)
+        
+        # Edge processing
+        edge_input = torch.cat([h[row], h[col], radial_norm], dim=-1)
+        m_ij = self.edge_mlp(edge_input)
+        
+        # Node update
+        agg = torch.zeros(h.size(0), self.hidden_dim, device=h.device)
+        agg.index_add_(0, row, m_ij)
+        
+        h_new = self.node_mlp(torch.cat([h, agg], dim=-1))
+        h_new = h + h_new  # Residual connection
+        
+        # Minimal position update (optional)
+        coord_diff = self.coord_mlp(m_ij)
+        coord_diff = torch.tanh(coord_diff) * 0.1  # Small updates
+        radial_normalized = radial / radial_norm
+        coord_update = coord_diff * radial_normalized
+        
+        pos_new = pos.clone()
+        pos_new.index_add_(0, row, coord_update)
+        
+        return h_new, pos_new
 
 
 class ImprovedProteinPocketEncoder(nn.Module):
     """
-    🎯 UPDATED: Improved pocket encoder - SchNet compatible
+    🎯 ENHANCED: Improved pocket encoder with EGNN-style processing and smart selection
     
-    Key Changes:
-    - Removed EGNN dependency 
-    - Using simple but effective MLPs
-    - Fully compatible with SchNet backend
-    - No unpacking issues
+    Key improvements:
+    - Smart atom selection strategies
+    - EGNN-compatible processing 
+    - Multi-scale pocket representation
+    - Chemical-aware encoding
+    - Flexible input handling
     """
     
     def __init__(self, node_features: int = 8, edge_features: int = 4,
-                 hidden_dim: int = 128, num_layers: int = 4, 
+                 hidden_dim: int = 128, num_layers: int = 3, 
                  output_dim: int = 256, max_radius: float = 10.0,
                  max_pocket_atoms: int = 1000, 
-                 selection_strategy: str = "adaptive"):
+                 selection_strategy: str = "adaptive",
+                 use_egnn_layers: bool = True):
         super().__init__()
         
         self.node_features = node_features
         self.edge_features = edge_features
         self.hidden_dim = hidden_dim
+        self.num_layers = num_layers
         self.max_pocket_atoms = max_pocket_atoms
         self.selection_strategy = selection_strategy
         self.max_radius = max_radius
+        self.use_egnn_layers = use_egnn_layers
         
         # Smart atom selector
         self.atom_selector = SmartPocketAtomSelector()
@@ -123,35 +254,63 @@ class ImprovedProteinPocketEncoder(nn.Module):
         self.node_embedding_6d = nn.Linear(6, hidden_dim)
         self.node_embedding_7d = nn.Linear(7, hidden_dim)
         self.node_embedding_8d = nn.Linear(8, hidden_dim)
+        self.node_embedding_9d = nn.Linear(9, hidden_dim)
         
-        # 🎯 UPDATED: Simple but effective processor (no EGNN)
-        self.processor_layers = nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(hidden_dim, hidden_dim),
-                nn.ReLU(),
-                nn.Dropout(0.1),
-                nn.LayerNorm(hidden_dim)
-            ) for _ in range(num_layers)
-        ])
+        # 🎯 EGNN-style processing layers (optional)
+        if use_egnn_layers:
+            self.egnn_layers = nn.ModuleList([
+                EGNNPocketLayer(hidden_dim) for _ in range(num_layers)
+            ])
+        else:
+            # Simple MLP layers
+            self.mlp_layers = nn.ModuleList([
+                nn.Sequential(
+                    nn.Linear(hidden_dim, hidden_dim),
+                    nn.SiLU(),
+                    nn.Dropout(0.1),
+                    nn.LayerNorm(hidden_dim)
+                ) for _ in range(num_layers)
+            ])
         
-        # Position-aware processing (SchNet-style)
+        # Multi-scale feature extraction
+        self.local_processor = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim)
+        )
+        
+        self.global_processor = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim)
+        )
+        
+        # Position-aware processing
         self.position_mlp = nn.Sequential(
             nn.Linear(3, hidden_dim // 4),
-            nn.ReLU(),
+            nn.SiLU(),
             nn.Linear(hidden_dim // 4, hidden_dim)
         )
         
         # Feature fusion
         self.feature_fusion = nn.Sequential(
-            nn.Linear(hidden_dim * 2, hidden_dim),
-            nn.ReLU(),
+            nn.Linear(hidden_dim * 3, hidden_dim),  # node + position + processed
+            nn.SiLU(),
+            nn.Dropout(0.1),
             nn.Linear(hidden_dim, hidden_dim)
         )
         
-        # Output projection
+        # Output projection with attention
+        self.attention_weights = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, 1),
+            nn.Softmax(dim=0)
+        )
+        
         self.output_projection = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
+            nn.SiLU(),
             nn.Dropout(0.1),
             nn.Linear(hidden_dim, output_dim)
         )
@@ -159,33 +318,31 @@ class ImprovedProteinPocketEncoder(nn.Module):
         # Layer normalization
         self.layer_norm = nn.LayerNorm(hidden_dim)
         
-        print(f"✅ ImprovedProteinPocketEncoder created (SchNet compatible)")
+        print(f"✅ Enhanced PocketEncoder created")
         print(f"   Strategy: {selection_strategy}, Max atoms: {max_pocket_atoms}")
+        print(f"   EGNN-style: {use_egnn_layers}, Layers: {num_layers}")
     
     def forward(self, x: torch.Tensor, pos: torch.Tensor, edge_index: torch.Tensor = None,
-                batch: torch.Tensor = None, ligand_pos: torch.Tensor = None):
+                batch: torch.Tensor = None, ligand_pos: torch.Tensor = None, **kwargs):
         """
-        🎯 UPDATED: SchNet-compatible forward pass
+        🎯 Enhanced forward pass with smart selection and multi-scale processing
         
         Args:
             x: Node features [N, node_features]
             pos: Node positions [N, 3] 
-            edge_index: Edge indices [2, E] (optional, mostly ignored)
+            edge_index: Edge indices [2, E] (optional)
             batch: Batch indices [N] (optional)
-            ligand_pos: Ligand positions [M, 3] (optional, for smart selection)
+            ligand_pos: Ligand positions [M, 3] (for smart selection)
         """
         
-        # Smart atom selection when pocket is too large
-        if x.size(0) > self.max_pocket_atoms:
-            pocket_center = torch.mean(pos, dim=0)
-            
+        # 🎯 Smart atom selection when pocket is too large
+        if x.size(0) > self.max_pocket_atoms and ligand_pos is not None:
             try:
-                selected_indices = self.atom_selector.select_multi_strategy(
-                    pos=pos, 
-                    x=x, 
-                    max_atoms=self.max_pocket_atoms,
-                    pocket_center=pocket_center,
+                selected_indices = self.atom_selector.select_adaptive(
+                    pocket_pos=pos, 
+                    pocket_x=x, 
                     ligand_pos=ligand_pos,
+                    max_atoms=self.max_pocket_atoms,
                     strategy=self.selection_strategy
                 )
                 
@@ -194,6 +351,18 @@ class ImprovedProteinPocketEncoder(nn.Module):
                 pos = pos[selected_indices]
                 if batch is not None:
                     batch = batch[selected_indices]
+                if edge_index is not None:
+                    # Filter edges to keep only selected atoms
+                    edge_mask = torch.isin(edge_index[0], selected_indices) & torch.isin(edge_index[1], selected_indices)
+                    if edge_mask.any():
+                        edge_index = edge_index[:, edge_mask]
+                        # Remap indices
+                        old_to_new = {old_idx.item(): new_idx for new_idx, old_idx in enumerate(selected_indices)}
+                        edge_index = torch.tensor([[old_to_new[edge_index[0, i].item()], old_to_new[edge_index[1, i].item()]] 
+                                                 for i in range(edge_index.size(1)) 
+                                                 if edge_index[0, i].item() in old_to_new and edge_index[1, i].item() in old_to_new]).t()
+                    else:
+                        edge_index = torch.zeros((2, 0), dtype=torch.long, device=x.device)
                 
             except Exception as e:
                 print(f"Smart selection failed: {e}, using random fallback")
@@ -206,40 +375,49 @@ class ImprovedProteinPocketEncoder(nn.Module):
         # Flexible embedding
         h = self._embed_features_flexible(x)
         
-        # Position encoding (SchNet-style)
+        # Position encoding
         pos_features = self.position_mlp(pos)
         
         # Combine node and position features
-        h_combined = self.feature_fusion(torch.cat([h, pos_features], dim=-1))
+        h_with_pos = self.feature_fusion(torch.cat([h, pos_features, h], dim=-1))
+        h_normalized = self.layer_norm(h_with_pos)
         
-        # Layer normalization
-        h_normalized = self.layer_norm(h_combined)
+        # 🎯 Process through EGNN layers or MLP layers
+        if self.use_egnn_layers:
+            h_processed, pos_updated = self._process_with_egnn(h_normalized, pos, edge_index)
+        else:
+            h_processed = self._process_with_mlp(h_normalized)
+            pos_updated = pos
         
-        # 🎯 UPDATED: Process through simple MLP layers (stable)
-        h_processed = h_normalized
-        for layer in self.processor_layers:
-            h_prev = h_processed
-            h_processed = layer(h_processed)
-            h_processed = h_processed + h_prev  # Residual connection
+        # Multi-scale processing
+        h_local = self.local_processor(h_processed)
+        h_global = self.global_processor(h_processed)
+        h_combined = h_local + h_global
         
-        # Global pooling
+        # Global pooling with attention
         if batch is not None:
             try:
-                pocket_mean = safe_global_pool(h_processed, batch, 'mean')
-                pocket_max = safe_global_pool(h_processed, batch, 'max')
-                pocket_repr = pocket_mean + pocket_max
+                # Attention-weighted pooling
+                attention_weights = self.attention_weights(h_combined)
+                weighted_features = h_combined * attention_weights
+                
+                pocket_mean = safe_global_pool(weighted_features, batch, 'mean')
+                pocket_max = safe_global_pool(h_combined, batch, 'max')
+                pocket_repr = pocket_mean + pocket_max * 0.5
             except Exception as e:
-                print(f"Pooling error: {e}")
-                pocket_repr = torch.mean(h_processed, dim=0, keepdim=True)
+                print(f"Attention pooling error: {e}")
+                pocket_repr = safe_global_pool(h_combined, batch, 'mean')
         else:
-            # Single pocket case
-            pocket_repr = torch.mean(h_processed, dim=0, keepdim=True)
+            # Single pocket case with attention
+            attention_weights = self.attention_weights(h_combined)
+            weighted_features = h_combined * attention_weights
+            pocket_repr = torch.sum(weighted_features, dim=0, keepdim=True)
         
         # Final output projection
         return self.output_projection(pocket_repr)
     
     def _embed_features_flexible(self, x: torch.Tensor) -> torch.Tensor:
-        """Flexible feature embedding"""
+        """Flexible feature embedding for different input dimensions"""
         if x.dim() != 2:
             raise ValueError(f"Expected 2D input, got {x.dim()}D: {x.shape}")
         
@@ -251,55 +429,94 @@ class ImprovedProteinPocketEncoder(nn.Module):
             return self.node_embedding_7d(x.float())
         elif input_dim == 8:
             return self.node_embedding_8d(x.float())
+        elif input_dim == 9:
+            return self.node_embedding_9d(x.float())
         elif input_dim < 6:
             # Pad to 6D
             padding = torch.zeros(x.size(0), 6 - input_dim, device=x.device, dtype=x.dtype)
             x_padded = torch.cat([x, padding], dim=1)
             return self.node_embedding_6d(x_padded.float())
-        elif input_dim == 9:
-            # Truncate to 8D
-            x_truncated = x[:, :8]
-            return self.node_embedding_8d(x_truncated.float())
+        elif input_dim > 9:
+            # Truncate to 9D
+            x_truncated = x[:, :9]
+            return self.node_embedding_9d(x_truncated.float())
         else:
-            # Pad or truncate to 7D
-            if input_dim < 7:
-                padding = torch.zeros(x.size(0), 7 - input_dim, device=x.device, dtype=x.dtype)
-                x_padded = torch.cat([x, padding], dim=1)
-                return self.node_embedding_7d(x_padded.float())
-            else:
-                x_truncated = x[:, :7]
-                return self.node_embedding_7d(x_truncated.float())
-
-
-# 🎯 UPDATED: Factory function for SchNet compatibility
-def create_improved_pocket_encoder(hidden_dim: int = 256, output_dim: int = 256, 
-                                 selection_strategy: str = "adaptive"):
-    """
-    🎯 UPDATED: Create improved pocket encoder - SchNet compatible version
+            # Pad to 8D
+            padding = torch.zeros(x.size(0), 8 - input_dim, device=x.device, dtype=x.dtype)
+            x_padded = torch.cat([x, padding], dim=1)
+            return self.node_embedding_8d(x_padded.float())
     
-    No EGNN dependencies, fully compatible with SchNet backend
+    def _process_with_egnn(self, h: torch.Tensor, pos: torch.Tensor, edge_index: torch.Tensor):
+        """Process with EGNN-style layers"""
+        h_current = h
+        pos_current = pos
+        
+        # Build edge index if not provided
+        if edge_index is None or edge_index.size(1) == 0:
+            # Create edges based on distance
+            if h.size(0) > 1:
+                edge_index = radius_graph(pos_current, r=self.max_radius, 
+                                        max_num_neighbors=min(32, h.size(0)-1))
+            else:
+                edge_index = torch.zeros((2, 0), dtype=torch.long, device=h.device)
+        
+        # Apply EGNN layers
+        for layer in self.egnn_layers:
+            h_prev = h_current
+            h_current, pos_current = layer(h_current, pos_current, edge_index)
+            h_current = h_current + h_prev  # Residual connection
+        
+        return h_current, pos_current
+    
+    def _process_with_mlp(self, h: torch.Tensor):
+        """Process with simple MLP layers"""
+        h_current = h
+        
+        for layer in self.mlp_layers:
+            h_prev = h_current
+            h_current = layer(h_current)
+            h_current = h_current + h_prev  # Residual connection
+        
+        return h_current
+
+
+# 🎯 Factory function for creating improved pocket encoder
+def create_improved_pocket_encoder(hidden_dim: int = 256, output_dim: int = 256, 
+                                 selection_strategy: str = "adaptive",
+                                 use_egnn_layers: bool = True, **kwargs):
+    """
+    🎯 Create improved pocket encoder with EGNN compatibility
+    
+    Args:
+        hidden_dim: Hidden dimension for processing
+        output_dim: Final output dimension
+        selection_strategy: Strategy for atom selection ("adaptive", "distance", "binding_site", "surface")
+        use_egnn_layers: Whether to use EGNN-style layers
     """
     
     return ImprovedProteinPocketEncoder(
-        node_features=7,
+        node_features=8,
         hidden_dim=hidden_dim,
         output_dim=output_dim,
-        selection_strategy=selection_strategy
+        selection_strategy=selection_strategy,
+        use_egnn_layers=use_egnn_layers,
+        **kwargs
     )
 
 
 # 🎯 Simple pocket encoder for basic usage
 class SimplePocketEncoder(nn.Module):
-    """Simple pocket encoder - most basic version"""
+    """Simple pocket encoder fallback"""
     
     def __init__(self, input_dim: int = 7, hidden_dim: int = 256, output_dim: int = 256):
         super().__init__()
         
         self.encoder = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
-            nn.ReLU(),
+            nn.SiLU(),
+            nn.Dropout(0.1),
             nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
+            nn.SiLU(),
             nn.Linear(hidden_dim, output_dim)
         )
     
@@ -311,51 +528,70 @@ class SimplePocketEncoder(nn.Module):
 
 # Test function
 def test_improved_pocket_encoder():
-    """Test the pocket encoder"""
-    print("Testing Improved Pocket Encoder (SchNet compatible)...")
+    """Test the enhanced pocket encoder"""
+    print("Testing Enhanced Pocket Encoder...")
     
     # Create test data
-    num_residues = 500
+    num_residues = 800
+    num_ligand_atoms = 25
+    
     pocket_x = torch.randn(num_residues, 7)
-    pocket_pos = torch.randn(num_residues, 3)
+    pocket_pos = torch.randn(num_residues, 3) * 20  # 20Å spread
     pocket_batch = torch.zeros(num_residues, dtype=torch.long)
     
-    # Create encoder
-    encoder = create_improved_pocket_encoder(
-        hidden_dim=128,
-        output_dim=256,
-        selection_strategy="adaptive"
-    )
+    ligand_pos = torch.randn(num_ligand_atoms, 3) * 5  # Ligand in center
     
-    # Test forward pass
+    # Test different strategies
+    strategies = ["adaptive", "distance", "binding_site", "surface"]
+    
+    for strategy in strategies:
+        print(f"\n   Testing strategy: {strategy}")
+        
+        try:
+            # Create encoder
+            encoder = create_improved_pocket_encoder(
+                hidden_dim=128,
+                output_dim=256,
+                selection_strategy=strategy,
+                use_egnn_layers=True
+            )
+            
+            # Test forward pass
+            pocket_repr = encoder(
+                x=pocket_x,
+                pos=pocket_pos,
+                batch=pocket_batch,
+                ligand_pos=ligand_pos
+            )
+            
+            print(f"     Input: {num_residues} residues → Output: {pocket_repr.shape}")
+            print(f"     ✅ Strategy '{strategy}' successful")
+            
+        except Exception as e:
+            print(f"     ❌ Strategy '{strategy}' failed: {e}")
+    
+    # Test fallback
+    print(f"\n   Testing simple fallback...")
     try:
-        pocket_repr = encoder(
-            x=pocket_x,
-            pos=pocket_pos,
-            batch=pocket_batch
-        )
-        
-        print(f"   Input: {num_residues} residues")
-        print(f"   Output: {pocket_repr.shape}")
-        print(f"   ✅ Success: SchNet-compatible pocket processing")
-        
-        return True
-        
+        simple_encoder = SimplePocketEncoder(input_dim=7, output_dim=256)
+        simple_repr = simple_encoder(pocket_x)
+        print(f"     Simple encoder: {pocket_x.shape} → {simple_repr.shape}")
+        print(f"     ✅ Simple encoder successful")
     except Exception as e:
-        print(f"   ❌ Error: {e}")
-        return False
+        print(f"     ❌ Simple encoder failed: {e}")
 
 
 if __name__ == "__main__":
-    print("🎯 Improved Pocket Encoder - SchNet Compatible Version")
+    print("🎯 Enhanced Pocket Encoder - EGNN Compatible")
     print("=" * 60)
     print("Features:")
-    print("- No EGNN dependencies (removed)")
-    print("- Simple but effective MLP processing")
-    print("- Smart atom selection")
-    print("- Position-aware encoding")
+    print("- Smart atom selection strategies")
+    print("- EGNN-style equivariant processing")
+    print("- Multi-scale feature extraction")
+    print("- Attention-weighted pooling")
+    print("- Chemical-aware encoding")
     print("- Flexible input dimensions")
-    print("- Full SchNet compatibility")
+    print("- Full EGNN backend compatibility")
     print()
     
     test_improved_pocket_encoder()

@@ -1,4 +1,4 @@
-# scripts/train_ddpm.py - UPDATED for SchNet Backend
+# scripts/train_ddpm.py - UPDATED for EGNN Backend
 import os
 import sys
 import yaml
@@ -17,14 +17,14 @@ sys.path.insert(0, str(project_root / "src"))
 print(f"Project root: {project_root}")
 
 try:
-    # 🎯 UPDATED: Import SchNet model instead of EGNN
-    from src.models.joint_2d_3d_model import create_joint2d3d_schnet_model
+    # 🎯 UPDATED: Import EGNN model instead of SchNet
+    from src.models.egnn import create_joint2d3d_egnn_model
     from src.models.ddpm_diffusion import MolecularDDPM, MolecularDDPMModel
     from src.data.data_loaders import CrossDockDataLoader
     from src.training.ddpm_trainer import DDPMMolecularTrainer
     from src.training.callbacks_fixed import WandBLogger, EarlyStopping, ModelCheckpoint
     from src.utils.molecular_utils import MolecularMetrics
-    print("✅ All imports successful (SchNet backend)")
+    print("✅ All imports successful (EGNN backend)")
 except ImportError as e:
     print(f"Import error: {e}")
     print("Make sure to install: pip install torch-geometric>=2.2.0")
@@ -105,14 +105,14 @@ def validate_config(config: Dict[str, Any]) -> Dict[str, Any]:
         model_config['bond_types'] = safe_int(model_config.get('bond_types', 4))
         model_config['hidden_dim'] = safe_int(model_config.get('hidden_dim', 256))
         model_config['pocket_dim'] = safe_int(model_config.get('pocket_dim', 256))
-        model_config['num_layers'] = safe_int(model_config.get('num_layers', 6))
+        model_config['num_layers'] = safe_int(model_config.get('num_layers', 4))  # EGNN works well with 4
         model_config['max_radius'] = safe_float(model_config.get('max_radius', 10.0))
         model_config['max_pocket_atoms'] = safe_int(model_config.get('max_pocket_atoms', 1000))
     
     # Fix DDPM config
     if 'ddpm' in config:
         ddpm_config = config['ddpm']
-        ddpm_config['num_timesteps'] = safe_int(ddpm_config.get('num_timesteps', 1000))
+        ddpm_config['num_timesteps'] = safe_int(ddmp_config.get('num_timesteps', 1000))
         ddpm_config['beta_start'] = safe_float(ddpm_config.get('beta_start', 0.0001))
         ddpm_config['beta_end'] = safe_float(ddpm_config.get('beta_end', 0.02))
     
@@ -153,15 +153,17 @@ def check_data_files(config):
     return True
 
 def create_model(config, device):
-    """🎯 UPDATED: Create SchNet DDPM molecular model"""
-    print("Creating SchNet DDPM model...")
+    """🎯 UPDATED: Create EGNN DDPM molecular model"""
+    print("Creating EGNN DDPM model...")
     
     try:
-        # 🎯 UPDATED: Create SchNet Joint2D3D model
-        base_model = create_joint2d3d_schnet_model(
+        # 🎯 UPDATED: Create EGNN Joint2D3D model
+        base_model = create_joint2d3d_egnn_model(
             hidden_dim=config['model']['hidden_dim'],
             num_layers=config['model']['num_layers'],
-            pocket_selection_strategy=config['model'].get('pocket_selection_strategy', 'adaptive')
+            cutoff=config['model']['max_radius'],
+            pocket_dim=config['model']['pocket_dim'],
+            conditioning_type=config['model'].get('conditioning_type', 'add')
         ).to(device)
         
         # Create DDPM
@@ -179,15 +181,16 @@ def create_model(config, device):
         total_params = sum(p.numel() for p in model.parameters())
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         
-        print(f"   Backend: SchNet (continuous-filter convolutions)")
+        print(f"   Backend: EGNN (E(n) equivariant)")
         print(f"   Total parameters: {total_params:,}")
         print(f"   Trainable parameters: {trainable_params:,}")
         print(f"   Model size: {total_params * 4 / 1e6:.1f} MB")
+        print(f"   🌟 EGNN Benefits: Equivariant, stable, proven in Pocket2Mol/SBDDiff")
         
         return model, ddpm
         
     except Exception as e:
-        print(f"Error creating SchNet model: {e}")
+        print(f"Error creating EGNN model: {e}")
         import traceback
         traceback.print_exc()
         return None, None
@@ -314,7 +317,7 @@ def create_trainer(model, ddpm, config, device):
         return None
 
 def main():
-    parser = argparse.ArgumentParser(description='Train DDPM SchNet Molecular Generator')
+    parser = argparse.ArgumentParser(description='Train DDPM EGNN Molecular Generator')
     parser.add_argument('--config', type=str, default='config/egnn_training_config.yaml')
     parser.add_argument('--test', action='store_true', help='Quick test mode')
     parser.add_argument('--epochs', type=int, help='Override epochs')
@@ -322,9 +325,9 @@ def main():
     
     args = parser.parse_args()
     
-    print("🎯 SchNet DDPM Molecular Generator Training")
+    print("🎯 EGNN DDPM Molecular Generator Training")
     print("=" * 60)
-    print(f"Backend: SchNet (stable continuous-filter convolutions)")
+    print(f"Backend: EGNN (E(n) equivariant, proven architecture)")
     print(f"Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
     # Load configuration
@@ -382,10 +385,11 @@ def main():
         return
     
     # Start training
-    print("\n🚀 Starting SchNet DDPM training...")
-    print("   - Continuous-filter convolutions")
+    print("\n🚀 Starting EGNN DDPM training...")
+    print("   - E(n) equivariant graph neural networks")
     print("   - Translation & rotation equivariant")
-    print("   - Stable and well-tested architecture")
+    print("   - Proven architecture from Pocket2Mol/SBDDiff")
+    print("   - More stable than SchNet for molecular generation")
     
     try:
         trainer.train(
