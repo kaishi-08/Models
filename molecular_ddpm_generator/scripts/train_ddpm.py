@@ -18,7 +18,7 @@ print(f"Project root: {project_root}")
 
 try:
     # 🎯 UPDATED: Import EGNN model instead of SchNet
-    from src.models.egnn import create_joint2d3d_egnn_model
+    from src.models.joint_2d_3d_model import create_joint2d3d_model  
     from src.models.ddpm_diffusion import MolecularDDPM, MolecularDDPMModel
     from src.data.data_loaders import CrossDockDataLoader
     from src.training.ddpm_trainer import DDPMMolecularTrainer
@@ -112,7 +112,7 @@ def validate_config(config: Dict[str, Any]) -> Dict[str, Any]:
     # Fix DDPM config
     if 'ddpm' in config:
         ddpm_config = config['ddpm']
-        ddpm_config['num_timesteps'] = safe_int(ddmp_config.get('num_timesteps', 1000))
+        ddpm_config['num_timesteps'] = safe_int(ddpm_config.get('num_timesteps', 1000))
         ddpm_config['beta_start'] = safe_float(ddpm_config.get('beta_start', 0.0001))
         ddpm_config['beta_end'] = safe_float(ddpm_config.get('beta_end', 0.02))
     
@@ -158,7 +158,7 @@ def create_model(config, device):
     
     try:
         # 🎯 UPDATED: Create EGNN Joint2D3D model
-        base_model = create_joint2d3d_egnn_model(
+        base_model = create_joint2d3d_model(
             hidden_dim=config['model']['hidden_dim'],
             num_layers=config['model']['num_layers'],
             cutoff=config['model']['max_radius'],
