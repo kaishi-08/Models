@@ -62,7 +62,7 @@ class DDPMMolecularGenerator:
         current_pos = pos_init.clone()
         
         # Reverse diffusion process
-        for t in reversed(range(self.ddmp.num_timesteps)):
+        for t in reversed(range(self.ddpm.num_timesteps)):
             t_batch = torch.full((1,), t, dtype=torch.long, device=self.device)
             
             with torch.no_grad():
