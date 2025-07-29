@@ -5,13 +5,13 @@ from typing import Optional, Dict, Any, List
 from rdkit import Chem
 from rdkit.Chem import AllChem
 import numpy as np
-from ..models.joint_2d_3d_model import Joint2D3DMolecularModel
+from ..models.joint_2d_3d_model import Joint2D3DModel
 from ..models.ddpm_diffusion import MolecularDDPM
 
 class DDPMMolecularGenerator:
     """DDPM-based molecular generation"""
     
-    def __init__(self, model: Joint2D3DMolecularModel, ddpm: MolecularDDPM,
+    def __init__(self, model: Joint2D3DModel, ddpm: MolecularDDPM,
                  device: str = 'cuda'):
         self.model = model
         self.ddpm = ddpm

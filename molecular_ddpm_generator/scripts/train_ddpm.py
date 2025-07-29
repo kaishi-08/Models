@@ -1,4 +1,4 @@
-# scripts/train_ddpm.py - UPDATED for EGNN Backend
+# scripts/train_ddpm.py - FIXED import error
 import os
 import sys
 import yaml
@@ -17,8 +17,8 @@ sys.path.insert(0, str(project_root / "src"))
 print(f"Project root: {project_root}")
 
 try:
-    # 🎯 UPDATED: Import EGNN model instead of SchNet
-    from src.models.joint_2d_3d_model import create_joint2d3d_model  
+    # 🎯 FIXED: Import correct class names
+    from src.models.joint_2d_3d_model import Joint2D3DModel, create_joint2d3d_model  # FIXED
     from src.models.ddpm_diffusion import MolecularDDPM, MolecularDDPMModel
     from src.data.data_loaders import CrossDockDataLoader
     from src.training.ddpm_trainer import DDPMMolecularTrainer
@@ -105,7 +105,7 @@ def validate_config(config: Dict[str, Any]) -> Dict[str, Any]:
         model_config['bond_types'] = safe_int(model_config.get('bond_types', 4))
         model_config['hidden_dim'] = safe_int(model_config.get('hidden_dim', 256))
         model_config['pocket_dim'] = safe_int(model_config.get('pocket_dim', 256))
-        model_config['num_layers'] = safe_int(model_config.get('num_layers', 4))  # EGNN works well with 4
+        model_config['num_layers'] = safe_int(model_config.get('num_layers', 4))
         model_config['max_radius'] = safe_float(model_config.get('max_radius', 10.0))
         model_config['max_pocket_atoms'] = safe_int(model_config.get('max_pocket_atoms', 1000))
     
@@ -153,16 +153,14 @@ def check_data_files(config):
     return True
 
 def create_model(config, device):
-    """🎯 UPDATED: Create EGNN DDPM molecular model"""
+    """🎯 FIXED: Create EGNN DDPM molecular model with correct class names"""
     print("Creating EGNN DDPM model...")
     
     try:
-        # 🎯 UPDATED: Create EGNN Joint2D3D model
+        # 🎯 FIXED: Use correct function name and parameters
         base_model = create_joint2d3d_model(
             hidden_dim=config['model']['hidden_dim'],
             num_layers=config['model']['num_layers'],
-            cutoff=config['model']['max_radius'],
-            pocket_dim=config['model']['pocket_dim'],
             conditioning_type=config['model'].get('conditioning_type', 'add')
         ).to(device)
         
@@ -171,7 +169,7 @@ def create_model(config, device):
             num_timesteps=config['ddpm']['num_timesteps'],
             beta_schedule=config['ddpm']['beta_schedule'],
             beta_start=config['ddpm']['beta_start'],
-            beta_end=config['ddpm']['beta_end']
+            beta_end=config['ddmp']['beta_end']
         )
         
         # Wrap with DDPM

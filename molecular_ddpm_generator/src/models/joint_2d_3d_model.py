@@ -196,9 +196,9 @@ class PhysicalSpecialist3D(nn.Module):
         
         # Non-bonded interaction detector
         self.interaction_classifier = nn.ModuleDict({
-            'hydrogen_bond': nn.Linear(self.hidden_dim * 2 + 1, 1),
-            'pi_pi_stacking': nn.Linear(self.hidden_dim * 2 + 1, 1),
-            'van_der_waals': nn.Linear(self.hidden_dim * 2 + 1, 1)
+            'hydrogen_bond': nn.Linear(self.hidden_dim * 2 + 2, 1),
+            'pi_pi_stacking': nn.Linear(self.hidden_dim * 2 + 2, 1),
+            'van_der_waals': nn.Linear(self.hidden_dim * 2 + 2, 1)
         })
         
         # Conformation analysis
@@ -243,7 +243,8 @@ class PhysicalSpecialist3D(nn.Module):
         
         interactions = {}
         for interaction_type, classifier in self.interaction_classifier.items():
-            edge_features = torch.cat([h[row], h[col], distances], dim=-1)
+            normalized_distances = distances / 10.0
+            edge_features = torch.cat([h[row], h[col], distances, normalized_distances], dim=-1)
             interaction_scores = torch.sigmoid(classifier(edge_features))
             interactions[interaction_type] = interaction_scores
         

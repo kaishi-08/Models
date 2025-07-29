@@ -15,7 +15,7 @@ class EGNNLayer(nn.Module):
         
         # Edge model
         self.edge_mlp = nn.Sequential(
-            nn.Linear(hidden_dim * 2 + edge_dim + 1, hidden_dim),
+            nn.Linear(hidden_dim * 2 + edge_dim, hidden_dim),
             nn.SiLU(),
             nn.Linear(hidden_dim, hidden_dim)
         )
