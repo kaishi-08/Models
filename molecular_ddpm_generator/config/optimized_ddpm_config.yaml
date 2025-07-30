@@ -221,7 +221,7 @@ pocket_selection:
 architecture:
   joint2d3d:
     use_egnn: true  # Sử dụng EGNN backend
-    egnn_edge_dim: 4
+    egnn_edge_dim: 3
     egnn_fourier_features_2d: 0
     egnn_fourier_features_3d: 8
     egnn_num_neighbors: 32
