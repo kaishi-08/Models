@@ -1,11 +1,11 @@
-# src/models/joint_2d_3d_model.py - Complementary 2D-3D Design
+# src/models/joint_2d_3d_model.py - Updated with Constraint Integration
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import global_mean_pool, global_max_pool, radius_graph
 from torch_geometric.utils import to_dense_batch
 from .base_model import MolecularModel
-from .egnn import EGNNBackbone
+from .egnn import ConstrainedEGNNBackbone, create_constrained_egnn_backbone
 
 try:
     from .pocket_encoder import create_improved_pocket_encoder
@@ -32,7 +32,7 @@ def safe_global_pool(x, batch, pool_type='mean'):
         return torch.stack(pooled)
 
 class ChemicalSpecialist2D(nn.Module):
-    """2D processing focused on chemical intelligence"""
+    """2D processing focused on chemical intelligence with constraint awareness"""
     
     def __init__(self, hidden_dim=256):
         super().__init__()
@@ -45,11 +45,20 @@ class ChemicalSpecialist2D(nn.Module):
         self.formal_charge_embedding = nn.Embedding(7, 32)
         self.hybridization_embedding = nn.Embedding(8, 32)
         
-        # Valence checker
-        self.valence_checker = nn.Sequential(
+        # Enhanced valence prediction (for constraint guidance)
+        self.valence_predictor = nn.Sequential(
             nn.Linear(self.hidden_dim, 64),
             nn.ReLU(),
-            nn.Linear(64, 8)
+            nn.Linear(64, 8),  # Max valence 8
+            nn.Softmax(dim=-1)
+        )
+        
+        # Bond type prediction (for constraint guidance)
+        self.bond_type_predictor = nn.Sequential(
+            nn.Linear(self.hidden_dim * 2, 128),
+            nn.ReLU(),
+            nn.Linear(128, 4),  # 4 bond types
+            nn.Softmax(dim=-1)
         )
         
         # Chemical graph convolutions
@@ -102,14 +111,25 @@ class ChemicalSpecialist2D(nn.Module):
         
         # Chemical analysis
         chemical_props = self.chemical_properties(h_chemical)
-        valence_pred = self.valence_checker(h_chemical)
         fg_features = self.fg_detector(h_chemical, edge_index, edge_attr)
+        
+        # Constraint guidance predictions
+        valence_pred = self.valence_predictor(h_chemical)
+        
+        # Bond type predictions for edges
+        bond_type_pred = None
+        if edge_index.size(1) > 0:
+            row, col = edge_index
+            edge_features = torch.cat([h_chemical[row], h_chemical[col]], dim=-1)
+            bond_type_pred = self.bond_type_predictor(edge_features)
         
         return {
             'chemical_features': h_chemical,
             'chemical_properties': chemical_props,
             'functional_groups': fg_features,
-            'valence_predictions': valence_pred
+            'valence_predictions': valence_pred,
+            'bond_type_predictions': bond_type_pred,
+            'atom_types': atom_types  # For constraint guidance
         }
 
 class ChemicalGraphConv(nn.Module):
@@ -175,17 +195,20 @@ class FunctionalGroupDetector(nn.Module):
         return torch.cat(fg_features, dim=-1)
 
 class PhysicalSpecialist3D(nn.Module):
-    """3D processing focused on physical interactions"""
+    """3D processing focused on physical interactions with constraints"""
     
-    def __init__(self, hidden_dim=256, cutoff=10.0):
+    def __init__(self, hidden_dim=256, cutoff=10.0, constraints=None):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.cutoff = cutoff
         
-        # Multi-scale spatial processing
-        self.short_range_egnn = EGNNBackbone(self.hidden_dim, num_layers=2, cutoff=3.0)
-        self.medium_range_egnn = EGNNBackbone(self.hidden_dim, num_layers=2, cutoff=6.0)
-        self.long_range_egnn = EGNNBackbone(self.hidden_dim, num_layers=2, cutoff=10.0)
+        # Use constrained EGNN backbone
+        self.constrained_egnn = create_constrained_egnn_backbone(
+            hidden_dim=self.hidden_dim, 
+            num_layers=3, 
+            cutoff=cutoff,
+            constraints=constraints or {}
+        )
         
         # Physical force modeling
         self.force_predictor = nn.Sequential(
@@ -211,25 +234,34 @@ class PhysicalSpecialist3D(nn.Module):
         # Steric clash detector
         self.steric_detector = nn.Linear(self.hidden_dim, 1)
         
-    def forward(self, h, pos, batch):
-        # Multi-scale spatial processing
-        h_short, pos_short = self.short_range_egnn(h, pos, batch)
-        h_medium, pos_medium = self.medium_range_egnn(h_short, pos_short, batch)
-        h_long, pos_final = self.long_range_egnn(h_medium, pos_medium, batch)
+    def forward(self, h, pos, batch, edge_index=None, edge_attr=None, atom_types=None):
+        # Constrained EGNN processing
+        egnn_outputs = self.constrained_egnn(
+            h=h, pos=pos, batch=batch, 
+            edge_index=edge_index, edge_attr=edge_attr,
+            atom_types=atom_types
+        )
+        
+        h_spatial = egnn_outputs['h']
+        pos_final = egnn_outputs['pos']
+        constraint_losses = egnn_outputs['constraint_losses']
+        total_constraint_loss = egnn_outputs['total_constraint_loss']
         
         # Physical analysis
-        forces = self.force_predictor(h_long)
-        interactions = self._detect_interactions(h_long, pos_final, batch)
-        conformer_features = self.conformer_analyzer(h_long)
-        steric_scores = self.steric_detector(h_long)
+        forces = self.force_predictor(h_spatial)
+        interactions = self._detect_interactions(h_spatial, pos_final, batch)
+        conformer_features = self.conformer_analyzer(h_spatial)
+        steric_scores = self.steric_detector(h_spatial)
         
         return {
-            'spatial_features': h_long,
+            'spatial_features': h_spatial,
             'updated_positions': pos_final,
             'predicted_forces': forces,
             'interactions': interactions,
             'conformer_features': conformer_features,
-            'steric_scores': steric_scores
+            'steric_scores': steric_scores,
+            'constraint_losses': constraint_losses,
+            'total_constraint_loss': total_constraint_loss
         }
     
     def _detect_interactions(self, h, pos, batch):
@@ -310,7 +342,9 @@ class ComplementaryFusion(nn.Module):
             'fused_features': h_fused,
             'consistency_score': consistency_score,
             'forces': physical_output['predicted_forces'],
-            'interactions': physical_output['interactions']
+            'interactions': physical_output['interactions'],
+            'constraint_losses': physical_output['constraint_losses'],
+            'total_constraint_loss': physical_output['total_constraint_loss']
         }
 
 class SimplePocketEncoder(nn.Module):
@@ -363,23 +397,29 @@ class SimplePocketEncoder(nn.Module):
         return self.global_processor(global_repr)
 
 class Joint2D3DModel(MolecularModel):
-    """Complementary Joint 2D-3D Molecular Model"""
+    """Complementary Joint 2D-3D Molecular Model with Constraints"""
     
     def __init__(self, atom_types=11, bond_types=4, hidden_dim=256, 
                  pocket_dim=256, num_layers=6, max_radius=10.0,
-                 max_pocket_atoms=1000, conditioning_type="add"):
+                 max_pocket_atoms=1000, conditioning_type="add",
+                 constraints=None):
         super().__init__(atom_types, bond_types, hidden_dim)
         
         self.hidden_dim = hidden_dim
         self.pocket_dim = pocket_dim
         self.conditioning_type = conditioning_type
+        self.constraints = constraints or {}
         
         # Atom embedding
         self.atom_embedding = nn.Linear(6, self.hidden_dim)
         
         # Specialized processing branches
         self.chemical_2d = ChemicalSpecialist2D(self.hidden_dim)
-        self.physical_3d = PhysicalSpecialist3D(self.hidden_dim, cutoff=max_radius)
+        self.physical_3d = PhysicalSpecialist3D(
+            self.hidden_dim, 
+            cutoff=max_radius,
+            constraints=self.constraints
+        )
         
         # Complementary fusion
         self.fusion = ComplementaryFusion(self.hidden_dim)
@@ -429,7 +469,10 @@ class Joint2D3DModel(MolecularModel):
         
         # Specialized processing
         chemical_output = self.chemical_2d(x, edge_index, edge_attr, batch)
-        physical_output = self.physical_3d(h_init, pos, batch)
+        physical_output = self.physical_3d(
+            h_init, pos, batch, edge_index, edge_attr, 
+            atom_types=chemical_output.get('atom_types')
+        )
         
         # Complementary fusion
         fusion_output = self.fusion(chemical_output, physical_output)
@@ -463,7 +506,11 @@ class Joint2D3DModel(MolecularModel):
             'chemical_properties': chemical_output['chemical_properties'],
             'physical_forces': fusion_output['forces'],
             'interactions': fusion_output['interactions'],
-            'consistency_score': fusion_output['consistency_score']
+            'consistency_score': fusion_output['consistency_score'],
+            'constraint_losses': fusion_output['constraint_losses'],
+            'total_constraint_loss': fusion_output['total_constraint_loss'],
+            'valence_predictions': chemical_output.get('valence_predictions'),
+            'bond_type_predictions': chemical_output.get('bond_type_predictions')
         }
     
     def _embed_atoms_flexible(self, x):
@@ -514,13 +561,14 @@ class Joint2D3DModel(MolecularModel):
         
         return atom_features + broadcasted_condition
 
-def create_joint2d3d_model(hidden_dim=256, num_layers=6, conditioning_type="add"):
-    """Create complementary Joint2D3D model"""
+def create_joint2d3d_model(hidden_dim=256, num_layers=6, conditioning_type="add", constraints=None):
+    """Create complementary Joint2D3D model with constraints"""
     return Joint2D3DModel(
         atom_types=11,
         bond_types=4,
         hidden_dim=hidden_dim,
         pocket_dim=hidden_dim,
         num_layers=num_layers,
-        conditioning_type=conditioning_type
+        conditioning_type=conditioning_type,
+        constraints=constraints
     )
