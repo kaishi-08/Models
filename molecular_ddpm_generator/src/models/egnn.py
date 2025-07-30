@@ -187,7 +187,7 @@ class ConstrainedEGNNLayer(nn.Module):
         
         # Standard EGNN components
         self.edge_mlp = nn.Sequential(
-            nn.Linear(hidden_dim * 2 + edge_dim + 1, hidden_dim),  # +1 for distance
+            nn.Linear(hidden_dim * 2 + edge_dim + 3, hidden_dim),  # +1 for distance
             nn.SiLU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.Dropout(0.1)
