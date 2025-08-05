@@ -17,14 +17,12 @@ sys.path.insert(0, str(project_root / "src"))
 print(f"Project root: {project_root}")
 
 try:
-    # 🎯 FIXED: Import correct class names
     from src.models.joint_2d_3d_model import Joint2D3DModel, create_joint2d3d_model  # FIXED
     from src.models.ddpm_diffusion import MolecularDDPM, MolecularDDPMModel
     from src.data.data_loaders import CrossDockDataLoader
     from src.training.ddpm_trainer import DDPMMolecularTrainer
     from src.training.callbacks_fixed import WandBLogger, EarlyStopping, ModelCheckpoint
     from src.utils.molecular_utils import MolecularMetrics
-    print("✅ All imports successful (EGNN backend)")
 except ImportError as e:
     print(f"Import error: {e}")
     print("Make sure to install: pip install torch-geometric>=2.2.0")
@@ -77,10 +75,6 @@ def validate_config(config: Dict[str, Any]) -> Dict[str, Any]:
                 opt_config['betas'] = [safe_float(b) for b in betas]
             else:
                 opt_config['betas'] = [0.9, 0.999]
-        
-        print(f"   Optimizer lr: {opt_config['lr']}")
-        print(f"   Optimizer eps: {opt_config['eps']}")
-        print(f"   Optimizer betas: {opt_config['betas']}")
     
     # Fix training config
     if 'training' in config:
@@ -120,11 +114,8 @@ def validate_config(config: Dict[str, Any]) -> Dict[str, Any]:
     return config
 
 def setup_device():
-    """Setup computing device"""
     if torch.cuda.is_available():
         device = torch.device('cuda')
-        print(f"Using GPU: {torch.cuda.get_device_name()}")
-        print(f"   GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
     else:
         device = torch.device('cpu')
         print("Using CPU")
@@ -153,7 +144,6 @@ def check_data_files(config):
     return True
 
 def create_model(config, device):
-    """🎯 FIXED: Create EGNN DDPM molecular model with correct class names"""
     print("Creating EGNN DDPM model...")
     
     try:
@@ -169,7 +159,7 @@ def create_model(config, device):
             num_timesteps=config['ddpm']['num_timesteps'],
             beta_schedule=config['ddpm']['beta_schedule'],
             beta_start=config['ddpm']['beta_start'],
-            beta_end=config['ddmp']['beta_end']
+            beta_end=config['ddpm']['beta_end']
         )
         
         # Wrap with DDPM
@@ -179,11 +169,9 @@ def create_model(config, device):
         total_params = sum(p.numel() for p in model.parameters())
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         
-        print(f"   Backend: EGNN (E(n) equivariant)")
         print(f"   Total parameters: {total_params:,}")
         print(f"   Trainable parameters: {trainable_params:,}")
         print(f"   Model size: {total_params * 4 / 1e6:.1f} MB")
-        print(f"   🌟 EGNN Benefits: Equivariant, stable, proven in Pocket2Mol/SBDDiff")
         
         return model, ddpm
         
@@ -201,10 +189,6 @@ def create_data_loaders(config):
         # Create loaders with validated config
         train_loader = CrossDockDataLoader.create_train_loader(config)
         val_loader = CrossDockDataLoader.create_val_loader(config)
-        
-        print(f"   Train batches: {len(train_loader)}")
-        print(f"   Val batches: {len(val_loader)}")
-        print(f"   Batch size: {config['data']['batch_size']}")
         
         # Test loading a batch
         print("Testing data loading...")
@@ -230,18 +214,10 @@ def create_data_loaders(config):
         return None, None
 
 def create_trainer(model, ddpm, config, device):
-    """Create DDPM trainer with validated config"""
-    print("Setting up trainer...")
-    
     try:
         # Create optimizer with validated parameters
         opt_config = config['optimizer']
-        
-        print(f"   Creating {opt_config['type']} optimizer...")
-        print(f"   lr: {opt_config['lr']} (type: {type(opt_config['lr'])})")
-        print(f"   eps: {opt_config['eps']} (type: {type(opt_config['eps'])})")
-        print(f"   betas: {opt_config['betas']} (type: {type(opt_config['betas'])})")
-        
+
         if opt_config['type'].lower() == 'adamw':
             optimizer = torch.optim.AdamW(
                 model.parameters(),
@@ -323,11 +299,6 @@ def main():
     
     args = parser.parse_args()
     
-    print("🎯 EGNN DDPM Molecular Generator Training")
-    print("=" * 60)
-    print(f"Backend: EGNN (E(n) equivariant, proven architecture)")
-    print(f"Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    
     # Load configuration
     config_path = project_root / args.config
     print(f"Loading config: {config_path}")
@@ -382,13 +353,6 @@ def main():
     if trainer is None:
         return
     
-    # Start training
-    print("\n🚀 Starting EGNN DDPM training...")
-    print("   - E(n) equivariant graph neural networks")
-    print("   - Translation & rotation equivariant")
-    print("   - Proven architecture from Pocket2Mol/SBDDiff")
-    print("   - More stable than SchNet for molecular generation")
-    
     try:
         trainer.train(
             train_loader=train_loader,
@@ -396,7 +360,7 @@ def main():
             num_epochs=config['training']['num_epochs'],
             save_path=str(project_root / config['logging']['save_path'] / "best_model.pth")
         )
-        print("🎉 Training completed successfully!")
+        print("Training completed successfully")
     except Exception as e:
         print(f"Training failed: {e}")
         import traceback

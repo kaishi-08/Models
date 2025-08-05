@@ -5,9 +5,7 @@ import torch.nn.functional as F
 import numpy as np
 from typing import Tuple, Optional, Dict, Any
 
-class MolecularDDPM(nn.Module):
-    """FIXED DDPM with proper batch handling"""
-    
+class MolecularDDPM(nn.Module):    
     def __init__(self, 
                  num_timesteps: int = 1000,
                  beta_schedule: str = "cosine",
@@ -34,7 +32,6 @@ class MolecularDDPM(nn.Module):
         self.sqrt_one_minus_alphas_cumprod = torch.sqrt(1 - self.alphas_cumprod)
         
     def _cosine_beta_schedule(self, timesteps, s=0.008):
-        """Cosine noise schedule"""
         steps = timesteps + 1
         x = torch.linspace(0, timesteps, steps)
         alphas_cumprod = torch.cos(((x / timesteps) + s) / (1 + s) * torch.pi * 0.5) ** 2
@@ -43,9 +40,6 @@ class MolecularDDPM(nn.Module):
         return torch.clip(betas, 0.0001, 0.9999)
     
     def forward_process(self, x0: torch.Tensor, t: torch.Tensor, noise: torch.Tensor = None):
-        """
-        🎯 FIXED: Add noise to data with proper batch handling
-        """
         if noise is None:
             noise = torch.randn_like(x0)
         
@@ -55,18 +49,10 @@ class MolecularDDPM(nn.Module):
         sqrt_alphas_cumprod = self.sqrt_alphas_cumprod.to(device)
         sqrt_one_minus_alphas_cumprod = self.sqrt_one_minus_alphas_cumprod.to(device)
         
-        # 🎯 CRITICAL FIX: Handle batch indexing properly
-        # x0 shape: [N_atoms, 3]
-        # t shape: [batch_size] 
-        # Need to map atoms to batches
-        
         # For each timestep in batch, get coefficients
         sqrt_alpha_cumprod_t = sqrt_alphas_cumprod[t]  # [batch_size]
         sqrt_one_minus_alpha_cumprod_t = sqrt_one_minus_alphas_cumprod[t]  # [batch_size]
         
-        # 🎯 FIXED: Proper broadcasting for atom-level data
-        # We need to know which atoms belong to which batch
-        # For now, assume single batch (t has only one element)
         if t.numel() == 1:
             # Single batch case
             sqrt_alpha_cumprod_t = sqrt_alpha_cumprod_t.item()
