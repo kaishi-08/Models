@@ -69,9 +69,6 @@ class MolecularDDPM(nn.Module):
         return x_t, noise
     
     def compute_loss(self, model, x0: torch.Tensor, **model_kwargs):
-        """
-        🎯 FIXED: Compute DDPM loss with proper batch handling
-        """
         device = x0.device
         num_atoms = x0.size(0)
         
@@ -100,9 +97,6 @@ class MolecularDDPM(nn.Module):
                     noise_pred = noise_pred['noise_pred']
                 else:
                     noise_pred = next(iter(noise_pred.values()))
-            
-            # 🎯 CRITICAL FIX: Scale model output to match noise scale
-            # Model outputs are too small (std ~0.08) vs noise (std ~1.0)
             # Scale up the predictions
             pred_std = noise_pred.std()
             noise_std = noise.std()
@@ -178,9 +172,6 @@ class MolecularDDPM(nn.Module):
 
 
 class MolecularDDPMModel(nn.Module):
-    """
-    🎯 FIXED: Wrapper with proper parameter handling and CORRECT INDENTATION
-    """
     
     def __init__(self, base_model, ddpm: MolecularDDPM):
         super().__init__()
@@ -195,11 +186,9 @@ class MolecularDDPMModel(nn.Module):
             nn.Linear(256, hidden_dim)
         )
         
-        # 🎯 CRITICAL FIX: Proper parameter initialization
         self.register_parameter('output_scale', nn.Parameter(torch.tensor(1.0)))
     
     def forward(self, **kwargs):
-        """🔧 FIXED: Forward pass with gradient preservation"""
         try:
             # Extract time if present
             t = kwargs.pop('t', None)
@@ -228,7 +217,6 @@ class MolecularDDPMModel(nn.Module):
             else:
                 pos_pred = outputs
             
-            # 🔧 FIXED: Ensure output has gradients and proper scaling
             if pos_pred is not None:
                 # Ensure gradients are preserved
                 if not pos_pred.requires_grad and pos_pred.dtype == torch.float:
@@ -256,7 +244,6 @@ class MolecularDDPMModel(nn.Module):
         except Exception as e:
             print(f"MolecularDDPMModel forward error: {e}")
             
-            # 🔧 FIXED: Emergency fallback with gradients
             pos = kwargs.get('pos')
             x = kwargs.get('x')
             
@@ -278,7 +265,6 @@ class MolecularDDPMModel(nn.Module):
         return emb
     
     def to(self, device):
-        """🎯 FIXED: Proper device transfer for parameters"""
         # Move base components
         self.base_model = self.base_model.to(device)
         self.time_embedding = self.time_embedding.to(device)

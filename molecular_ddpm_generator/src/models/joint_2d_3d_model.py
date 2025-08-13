@@ -1,11 +1,11 @@
-# src/models/joint_2d_3d_model.py - Updated with Constraint Integration
+# src/models/joint_2d_3d_model.py - UPDATED: Using Corrected EGNN Implementation
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import global_mean_pool, global_max_pool, radius_graph
 from torch_geometric.utils import to_dense_batch
 from .base_model import MolecularModel
-from .egnn import ConstrainedEGNNBackbone, create_constrained_egnn_backbone
+from .egnn import CorrectedEGNNBackbone, create_corrected_egnn_backbone  # 🔄 UPDATED IMPORT
 
 try:
     from .pocket_encoder import create_improved_pocket_encoder
@@ -32,7 +32,7 @@ def safe_global_pool(x, batch, pool_type='mean'):
         return torch.stack(pooled)
 
 class ChemicalSpecialist2D(nn.Module):
-    """2D processing focused on chemical intelligence with constraint awareness"""
+    """2D processing focused on chemical intelligence"""
     
     def __init__(self, hidden_dim=256):
         super().__init__()
@@ -44,22 +44,6 @@ class ChemicalSpecialist2D(nn.Module):
         self.atom_type_embedding = nn.Embedding(11, 64)
         self.formal_charge_embedding = nn.Embedding(7, 32)
         self.hybridization_embedding = nn.Embedding(8, 32)
-        
-        # Enhanced valence prediction (for constraint guidance)
-        self.valence_predictor = nn.Sequential(
-            nn.Linear(self.hidden_dim, 64),
-            nn.ReLU(),
-            nn.Linear(64, 8),  # Max valence 8
-            nn.Softmax(dim=-1)
-        )
-        
-        # Bond type prediction (for constraint guidance)
-        self.bond_type_predictor = nn.Sequential(
-            nn.Linear(self.hidden_dim * 2, 128),
-            nn.ReLU(),
-            nn.Linear(128, 4),  # 4 bond types
-            nn.Softmax(dim=-1)
-        )
         
         # Chemical graph convolutions
         self.chemical_gnn = nn.ModuleList([
@@ -113,23 +97,11 @@ class ChemicalSpecialist2D(nn.Module):
         chemical_props = self.chemical_properties(h_chemical)
         fg_features = self.fg_detector(h_chemical, edge_index, edge_attr)
         
-        # Constraint guidance predictions
-        valence_pred = self.valence_predictor(h_chemical)
-        
-        # Bond type predictions for edges
-        bond_type_pred = None
-        if edge_index.size(1) > 0:
-            row, col = edge_index
-            edge_features = torch.cat([h_chemical[row], h_chemical[col]], dim=-1)
-            bond_type_pred = self.bond_type_predictor(edge_features)
-        
         return {
             'chemical_features': h_chemical,
             'chemical_properties': chemical_props,
             'functional_groups': fg_features,
-            'valence_predictions': valence_pred,
-            'bond_type_predictions': bond_type_pred,
-            'atom_types': atom_types  # For constraint guidance
+            'atom_types': atom_types  # For EGNN processing
         }
 
 class ChemicalGraphConv(nn.Module):
@@ -195,48 +167,48 @@ class FunctionalGroupDetector(nn.Module):
         return torch.cat(fg_features, dim=-1)
 
 class PhysicalSpecialist3D(nn.Module):
-    """3D processing focused on physical interactions with constraints"""
+    """3D processing with CORRECTED SE(3) Equivariant EGNN"""
     
-    def __init__(self, hidden_dim=256, cutoff=10.0, constraints=None):
+    def __init__(self, hidden_dim=256, cutoff=10.0, num_layers=4):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.cutoff = cutoff
         
-        # Use constrained EGNN backbone
-        self.constrained_egnn = create_constrained_egnn_backbone(
-            hidden_dim=self.hidden_dim, 
-            num_layers=3, 
+        # 🎯 CORRECTED: Use proper EGNN implementation
+        self.egnn_backbone = create_corrected_egnn_backbone(
+            hidden_dim=hidden_dim, 
+            num_layers=num_layers, 
             cutoff=cutoff,
-            constraints=constraints or {}
+            sin_embedding=True,  # Use sinusoidal distance embedding
+            reflection_equiv=True  # Full SE(3) equivariance including reflections
         )
         
         # Physical force modeling
         self.force_predictor = nn.Sequential(
-            nn.Linear(self.hidden_dim, 128),
+            nn.Linear(hidden_dim, 128),
             nn.Tanh(),
             nn.Linear(128, 3)
         )
         
         # Non-bonded interaction detector
         self.interaction_classifier = nn.ModuleDict({
-            'hydrogen_bond': nn.Linear(self.hidden_dim * 2 + 2, 1),
-            'pi_pi_stacking': nn.Linear(self.hidden_dim * 2 + 2, 1),
-            'van_der_waals': nn.Linear(self.hidden_dim * 2 + 2, 1)
+            'hydrogen_bond': nn.Linear(hidden_dim * 2 + 2, 1),
+            'pi_pi_stacking': nn.Linear(hidden_dim * 2 + 2, 1),
+            'van_der_waals': nn.Linear(hidden_dim * 2 + 2, 1)
         })
         
         # Conformation analysis
         self.conformer_analyzer = nn.Sequential(
-            nn.Linear(self.hidden_dim, 128),
+            nn.Linear(hidden_dim, 128),
             nn.ReLU(),
             nn.Linear(128, 64)
         )
         
-        # Steric clash detector
-        self.steric_detector = nn.Linear(self.hidden_dim, 1)
+        print(f"✅ PhysicalSpecialist3D with CORRECTED EGNN")
         
     def forward(self, h, pos, batch, edge_index=None, edge_attr=None, atom_types=None):
-        # Constrained EGNN processing
-        egnn_outputs = self.constrained_egnn(
+        # 🎯 CORRECTED EGNN processing with proper SE(3) equivariance
+        egnn_outputs = self.egnn_backbone(
             h=h, pos=pos, batch=batch, 
             edge_index=edge_index, edge_attr=edge_attr,
             atom_types=atom_types
@@ -251,7 +223,6 @@ class PhysicalSpecialist3D(nn.Module):
         forces = self.force_predictor(h_spatial)
         interactions = self._detect_interactions(h_spatial, pos_final, batch)
         conformer_features = self.conformer_analyzer(h_spatial)
-        steric_scores = self.steric_detector(h_spatial)
         
         return {
             'spatial_features': h_spatial,
@@ -259,7 +230,6 @@ class PhysicalSpecialist3D(nn.Module):
             'predicted_forces': forces,
             'interactions': interactions,
             'conformer_features': conformer_features,
-            'steric_scores': steric_scores,
             'constraint_losses': constraint_losses,
             'total_constraint_loss': total_constraint_loss
         }
@@ -293,8 +263,8 @@ class ComplementaryFusion(nn.Module):
         self.chemical_to_physical = nn.MultiheadAttention(self.hidden_dim, num_heads=8, batch_first=True)
         self.physical_to_chemical = nn.MultiheadAttention(self.hidden_dim, num_heads=8, batch_first=True)
         
-        # Constraint integration
-        self.constraint_fusion = nn.Sequential(
+        # Feature fusion
+        self.fusion = nn.Sequential(
             nn.Linear(self.hidden_dim * 2 + 32 + 64, self.hidden_dim),
             nn.ReLU(),
             nn.Linear(self.hidden_dim, self.hidden_dim)
@@ -333,7 +303,7 @@ class ComplementaryFusion(nn.Module):
             conformer_features
         ], dim=-1)
         
-        h_fused = self.constraint_fusion(combined_features)
+        h_fused = self.fusion(combined_features)
         
         # Consistency check
         consistency_score = self.consistency_checker(torch.cat([h_chem, h_phys], dim=-1))
@@ -397,18 +367,20 @@ class SimplePocketEncoder(nn.Module):
         return self.global_processor(global_repr)
 
 class Joint2D3DModel(MolecularModel):
-    """Complementary Joint 2D-3D Molecular Model with Constraints"""
+    """
+    🎯 UPDATED: Joint 2D-3D Molecular Model with CORRECTED SE(3) Equivariant EGNN
+    
+    Now uses proper EGNN implementation from DiffSBDD for guaranteed SE(3) equivariance
+    """
     
     def __init__(self, atom_types=11, bond_types=4, hidden_dim=256, 
                  pocket_dim=256, num_layers=6, max_radius=10.0,
-                 max_pocket_atoms=1000, conditioning_type="add",
-                 constraints=None):
+                 max_pocket_atoms=1000, conditioning_type="add"):
         super().__init__(atom_types, bond_types, hidden_dim)
         
         self.hidden_dim = hidden_dim
         self.pocket_dim = pocket_dim
         self.conditioning_type = conditioning_type
-        self.constraints = constraints or {}
         
         # Atom embedding
         self.atom_embedding = nn.Linear(6, self.hidden_dim)
@@ -418,7 +390,7 @@ class Joint2D3DModel(MolecularModel):
         self.physical_3d = PhysicalSpecialist3D(
             self.hidden_dim, 
             cutoff=max_radius,
-            constraints=self.constraints
+            num_layers=num_layers
         )
         
         # Complementary fusion
@@ -459,6 +431,8 @@ class Joint2D3DModel(MolecularModel):
         )
         
         self.position_head = nn.Linear(self.hidden_dim, 3)
+        
+        print(f"✅ Joint2D3DModel with CORRECTED SE(3) Equivariant EGNN initialized!")
         
     def forward(self, x, pos, edge_index, edge_attr, batch,
                 pocket_x=None, pocket_pos=None, pocket_edge_index=None, 
@@ -508,9 +482,7 @@ class Joint2D3DModel(MolecularModel):
             'interactions': fusion_output['interactions'],
             'consistency_score': fusion_output['consistency_score'],
             'constraint_losses': fusion_output['constraint_losses'],
-            'total_constraint_loss': fusion_output['total_constraint_loss'],
-            'valence_predictions': chemical_output.get('valence_predictions'),
-            'bond_type_predictions': chemical_output.get('bond_type_predictions')
+            'total_constraint_loss': fusion_output['total_constraint_loss']
         }
     
     def _embed_atoms_flexible(self, x):
@@ -561,8 +533,8 @@ class Joint2D3DModel(MolecularModel):
         
         return atom_features + broadcasted_condition
 
-def create_joint2d3d_model(hidden_dim=256, num_layers=6, conditioning_type="add", constraints=None):
-    """Create complementary Joint2D3D model with constraints"""
+def create_joint2d3d_model(hidden_dim=256, num_layers=6, conditioning_type="add", **kwargs):
+    """Create Joint2D3D model with CORRECTED SE(3) equivariant EGNN"""
     return Joint2D3DModel(
         atom_types=11,
         bond_types=4,
@@ -570,5 +542,5 @@ def create_joint2d3d_model(hidden_dim=256, num_layers=6, conditioning_type="add"
         pocket_dim=hidden_dim,
         num_layers=num_layers,
         conditioning_type=conditioning_type,
-        constraints=constraints
+        **kwargs
     )

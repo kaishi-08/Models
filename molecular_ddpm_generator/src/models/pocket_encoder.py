@@ -1,4 +1,3 @@
-# src/models/pocket_encoder.py - REFINED: EGNN Compatible & Enhanced for Molecular Generation
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -9,7 +8,6 @@ import numpy as np
 
 # Safe global pooling function
 def safe_global_pool(x, batch, pool_type='mean'):
-    """Safe global pooling with CUDA/CPU fallback"""
     try:
         if pool_type == 'mean':
             return global_mean_pool(x, batch)
@@ -42,13 +40,11 @@ def safe_global_pool(x, batch, pool_type='mean'):
 
 
 class SmartPocketAtomSelector:
-    """🎯 ENHANCED: Smart strategies for selecting important pocket atoms for molecular generation"""
     
     @staticmethod
     def select_by_distance_to_ligand(pocket_pos: torch.Tensor, ligand_pos: torch.Tensor, 
                                    max_atoms: int, primary_radius: float = 6.0, 
                                    secondary_radius: float = 12.0):
-        """Distance-based selection relative to ligand (most important for generation)"""
         ligand_center = torch.mean(ligand_pos, dim=0)
         distances = torch.norm(pocket_pos - ligand_center, dim=1)
         
@@ -324,18 +320,7 @@ class ImprovedProteinPocketEncoder(nn.Module):
     
     def forward(self, x: torch.Tensor, pos: torch.Tensor, edge_index: torch.Tensor = None,
                 batch: torch.Tensor = None, ligand_pos: torch.Tensor = None, **kwargs):
-        """
-        🎯 Enhanced forward pass with smart selection and multi-scale processing
         
-        Args:
-            x: Node features [N, node_features]
-            pos: Node positions [N, 3] 
-            edge_index: Edge indices [2, E] (optional)
-            batch: Batch indices [N] (optional)
-            ligand_pos: Ligand positions [M, 3] (for smart selection)
-        """
-        
-        # 🎯 Smart atom selection when pocket is too large
         if x.size(0) > self.max_pocket_atoms and ligand_pos is not None:
             try:
                 selected_indices = self.atom_selector.select_adaptive(
@@ -346,13 +331,11 @@ class ImprovedProteinPocketEncoder(nn.Module):
                     strategy=self.selection_strategy
                 )
                 
-                # Apply selection
                 x = x[selected_indices]
                 pos = pos[selected_indices]
                 if batch is not None:
                     batch = batch[selected_indices]
                 if edge_index is not None:
-                    # Filter edges to keep only selected atoms
                     edge_mask = torch.isin(edge_index[0], selected_indices) & torch.isin(edge_index[1], selected_indices)
                     if edge_mask.any():
                         edge_index = edge_index[:, edge_mask]
@@ -372,7 +355,6 @@ class ImprovedProteinPocketEncoder(nn.Module):
                 if batch is not None:
                     batch = batch[indices]
         
-        # Flexible embedding
         h = self._embed_features_flexible(x)
         
         # Position encoding
@@ -484,16 +466,7 @@ class ImprovedProteinPocketEncoder(nn.Module):
 def create_improved_pocket_encoder(hidden_dim: int = 256, output_dim: int = 256, 
                                  selection_strategy: str = "adaptive",
                                  use_egnn_layers: bool = True, **kwargs):
-    """
-    🎯 Create improved pocket encoder with EGNN compatibility
-    
-    Args:
-        hidden_dim: Hidden dimension for processing
-        output_dim: Final output dimension
-        selection_strategy: Strategy for atom selection ("adaptive", "distance", "binding_site", "surface")
-        use_egnn_layers: Whether to use EGNN-style layers
-    """
-    
+  
     return ImprovedProteinPocketEncoder(
         node_features=8,
         hidden_dim=hidden_dim,
@@ -582,16 +555,4 @@ def test_improved_pocket_encoder():
 
 
 if __name__ == "__main__":
-    print("🎯 Enhanced Pocket Encoder - EGNN Compatible")
-    print("=" * 60)
-    print("Features:")
-    print("- Smart atom selection strategies")
-    print("- EGNN-style equivariant processing")
-    print("- Multi-scale feature extraction")
-    print("- Attention-weighted pooling")
-    print("- Chemical-aware encoding")
-    print("- Flexible input dimensions")
-    print("- Full EGNN backend compatibility")
-    print()
-    
     test_improved_pocket_encoder()

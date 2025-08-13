@@ -6,9 +6,7 @@ from torch_geometric.data import Dataset, Data
 from typing import List, Dict, Any, Optional
 import os
 
-class CrossDockMolecularDataset(Dataset):
-    """Dataset for CrossDock molecular structures with protein pocket conditioning"""
-    
+class CrossDockMolecularDataset(Dataset):    
     def __init__(self, data_path: str, transform=None, pre_transform=None, 
                  include_pocket: bool = True, max_atoms: int = 50,
                  augment: bool = False):
