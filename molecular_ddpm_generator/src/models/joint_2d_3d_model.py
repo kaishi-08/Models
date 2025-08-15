@@ -188,9 +188,7 @@ class ChemicalSpecialist2D(nn.Module):
         
         return bond_logits
 
-class PhysicalSpecialist3D(nn.Module):
-    """3D processing with CORRECTED SE(3) Equivariant EGNN"""
-    
+class PhysicalSpecialist3D(nn.Module):    
     def __init__(self, hidden_dim=256, cutoff=10.0, num_layers=4):
         super().__init__()
         self.hidden_dim = hidden_dim
@@ -520,7 +518,6 @@ class Joint2D3DModel(MolecularModel):
             return torch.tensor(0.0)
     
     def _compute_atom_valence_compatibility(self, atom_logits, predicted_valences):
-        """Compute compatibility between predicted atoms and valences"""
         if atom_logits is None or predicted_valences is None:
             return torch.tensor(0.0)
         
@@ -540,7 +537,6 @@ class Joint2D3DModel(MolecularModel):
 
 
 def create_joint2d3d_model(hidden_dim=256, num_layers=6, conditioning_type="add", **kwargs):
-    """Create enhanced Joint2D3D model with chemical constraints"""
     return Joint2D3DModel(
         atom_types=11,
         bond_types=4,
