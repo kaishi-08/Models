@@ -1,4 +1,3 @@
-# src/data/data_loaders.py - CLEAN VERSION (no debug messages)
 import torch
 from torch.utils.data import DataLoader
 from torch_geometric.data import Data, Batch
@@ -7,9 +6,6 @@ from .pocket_dataset import ProteinPocketDataset
 from typing import Optional, Dict, Any
 
 def safe_collate_crossdock_data(batch, max_pocket_atoms_per_mol: int = 200):
-    """
-    Clean collate function without debug messages
-    """
     if not batch or len(batch) == 0:
         return None
     

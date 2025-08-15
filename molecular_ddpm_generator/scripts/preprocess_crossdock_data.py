@@ -49,16 +49,16 @@ class GenerationFocusedPreprocessor:
         split_file = Path("data/split_by_name.pt")
         
         if split_file.exists():
-            print("📂 Loading existing splits...")
+            print("Loading existing splits...")
             try:
                 splits = torch.load(split_file)
                 if 'train' in splits and 'test' in splits:
-                    print(f"✅ Found train/test splits: train={len(splits['train'])}, test={len(splits['test'])}")
+                    print(f"Found train/test splits: train={len(splits['train'])}, test={len(splits['test'])}")
                     return splits
                 else:
-                    print("⚠️  Invalid split format, creating new splits...")
+                    print("Invalid split format, creating new splits...")
             except Exception as e:
-                print(f"⚠️  Error loading splits: {e}, creating new splits...")
+                print(f"Error loading splits: {e}, creating new splits...")
         
         print("🔧 Creating train/test splits from index.pkl...")
         return self.create_train_test_splits()
@@ -67,7 +67,7 @@ class GenerationFocusedPreprocessor:
         """Create train/test splits"""
         index_file = self.data_dir / "index.pkl"
         if not index_file.exists():
-            print(f"❌ index.pkl not found at {index_file}")
+            print(f"index.pkl not found at {index_file}")
             return None
         
         try:
@@ -181,10 +181,6 @@ class GenerationFocusedPreprocessor:
         return complex_data
     
     def mol_to_generation_features(self, mol):
-        """
-        Convert molecule to generation-focused features
-        Based on DiffSBDD, Pocket2Mol atom representation
-        """
         if mol is None:
             return None
         
@@ -208,7 +204,7 @@ class GenerationFocusedPreprocessor:
             
             # Minimal but essential features for valid molecular generation
             features = [
-                atom_type,                        # 0: Atom type (most important)
+                atom_type,                       # 0: Atom type (most important)
                 atom.GetDegree(),                # 1: Degree (connectivity)
                 atom.GetFormalCharge() + 2,      # 2: Formal charge (shifted to be positive)
                 int(atom.GetIsAromatic()),       # 3: Aromatic (important for ring systems)
@@ -385,9 +381,7 @@ class GenerationFocusedPreprocessor:
     
     def process_dataset(self):
         """Process dataset with generation-focused features"""
-        print("🔄 Processing CrossDock dataset for molecular generation...")
-        print("   Features optimized for DiffSBDD/Pocket2Mol-style generation")
-        
+        print("Processing CrossDock dataset for molecular generation...")        
         # Load splits
         splits = self.load_splits()
         if splits is None:
@@ -440,11 +434,7 @@ class GenerationFocusedPreprocessor:
             else:
                 print(f"❌ No valid data for {split_name}")
         
-        print("\n🎉 Generation-focused preprocessing completed!")
-        print("📋 Feature Summary:")
-        print("   Ligand: 6 atom features + 3 bond features")
-        print("   Pocket: 7 Cα features + distance edges")
-        print("   Optimized for: SDE diffusion models")
+        print("\n Generation-focused preprocessing completed!")
     
     def _print_feature_summary(self, processed_data, split_name):
         """Print feature summary"""
@@ -468,11 +458,6 @@ class GenerationFocusedPreprocessor:
             print(f"     Residues: {np.mean(pocket_residues):.1f} ± {np.std(pocket_residues):.1f} (avg ± std)")
             print(f"     Range: {np.min(pocket_residues)} - {np.max(pocket_residues)} residues")
         
-        print(f"   Feature dimensions:")
-        print(f"     Ligand atoms: [N, 6] features + [N, 3] positions")
-        print(f"     Ligand bonds: [E, 3] features")
-        print(f"     Pocket Cα: [M, 7] features + [M, 3] positions")
-
 def main():
     parser = argparse.ArgumentParser(description='Generation-focused CrossDock preprocessing')
     parser.add_argument('--data_dir', type=str, default='data/crossdocked_pocket10',
@@ -486,18 +471,14 @@ def main():
     
     # Check if data directory exists
     if not Path(args.data_dir).exists():
-        print(f"❌ Data directory not found: {args.data_dir}")
+        print(f"Data directory not found: {args.data_dir}")
         print("Please make sure crossdocked_pocket10 is in the correct location")
         return
     
-    print(f"📁 Data directory: {args.data_dir}")
-    print(f"📁 Output directory: {args.output_dir}")
-    print("🎯 Generation-focused features:")
-    print("   - Minimal but essential atom/bond features")
-    print("   - Cα-only pocket representation")
-    print("   - Optimized for SDE diffusion models")
+    print(f"Data directory: {args.data_dir}")
+    print(f"Output directory: {args.output_dir}")
     if args.max_samples:
-        print(f"⚠️  Max samples: {args.max_samples}")
+        print(f"Max samples: {args.max_samples}")
     
     preprocessor = GenerationFocusedPreprocessor(
         data_dir=args.data_dir, 

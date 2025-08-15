@@ -129,7 +129,7 @@ def print_training_status(model_dir, log_path=None):
         logs = parse_log_file(log_path)
         if logs:
             latest_log = logs[-1]
-            print(f"\n📝 Latest log entry:")
+            print(f"\nLatest log entry:")
             for key, value in latest_log.items():
                 if isinstance(value, float):
                     print(f"   {key}: {value:.4f}")
@@ -138,9 +138,9 @@ def print_training_status(model_dir, log_path=None):
 
 def continuous_monitor(model_dir, log_path=None, refresh_interval=30):
     """Continuously monitor training"""
-    print("🔄 Starting continuous monitoring...")
-    print(f"📁 Model directory: {model_dir}")
-    print(f"🔄 Refresh interval: {refresh_interval}s")
+    print("Starting continuous monitoring...")
+    print(f"Model directory: {model_dir}")
+    print(f"Refresh interval: {refresh_interval}s")
     print("Press Ctrl+C to stop")
     print("-" * 50)
     

@@ -5,10 +5,10 @@ import torch.nn.functional as F
 from torch_geometric.nn import global_mean_pool, global_max_pool, radius_graph
 from torch_geometric.utils import to_dense_batch
 from .base_model import MolecularModel
-from .egnn import CorrectedEGNNBackbone, create_corrected_egnn_backbone  # 🔄 UPDATED IMPORT
+from .egnn import CorrectedEGNNBackbone, create_corrected_egnn_backbone  
 
 try:
-    from .pocket_encoder import create_improved_pocket_encoder
+    from .pocket_encoder import create_improved_pocket_encoder, SimplePocketEncoder
     IMPROVED_POCKET_AVAILABLE = True
 except ImportError:
     IMPROVED_POCKET_AVAILABLE = False
@@ -316,55 +316,6 @@ class ComplementaryFusion(nn.Module):
             'constraint_losses': physical_output['constraint_losses'],
             'total_constraint_loss': physical_output['total_constraint_loss']
         }
-
-class SimplePocketEncoder(nn.Module):
-    """Simple pocket encoder fallback"""
-    
-    def __init__(self, input_dim=7, hidden_dim=256, output_dim=256, max_atoms=1000):
-        super().__init__()
-        self.input_dim = input_dim
-        self.hidden_dim = hidden_dim
-        self.output_dim = output_dim
-        self.max_atoms = max_atoms
-        
-        self.pocket_embedding = nn.Linear(input_dim, hidden_dim)
-        self.pocket_processor = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.SiLU(),
-            nn.Linear(hidden_dim, hidden_dim)
-        )
-        self.global_processor = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.SiLU(),
-            nn.Linear(hidden_dim, output_dim)
-        )
-        
-    def forward(self, pocket_x, pocket_pos, pocket_edge_index, pocket_batch):
-        if pocket_x.size(0) > self.max_atoms:
-            indices = torch.randperm(pocket_x.size(0))[:self.max_atoms]
-            pocket_x = pocket_x[indices]
-            if pocket_batch is not None:
-                pocket_batch = pocket_batch[indices]
-        
-        # Flexible embedding
-        input_dim = pocket_x.size(1)
-        if input_dim != self.input_dim:
-            if input_dim < self.input_dim:
-                padding = torch.zeros(pocket_x.size(0), self.input_dim - input_dim, 
-                                    device=pocket_x.device, dtype=pocket_x.dtype)
-                pocket_x = torch.cat([pocket_x, padding], dim=1)
-            else:
-                pocket_x = pocket_x[:, :self.input_dim]
-        
-        pocket_emb = self.pocket_embedding(pocket_x.float())
-        processed_emb = self.pocket_processor(pocket_emb)
-        
-        if pocket_batch is not None:
-            global_repr = safe_global_pool(processed_emb, pocket_batch, 'mean')
-        else:
-            global_repr = torch.mean(processed_emb, dim=0, keepdim=True)
-        
-        return self.global_processor(global_repr)
 
 class Joint2D3DModel(MolecularModel):
     """

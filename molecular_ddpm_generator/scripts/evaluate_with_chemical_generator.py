@@ -1,4 +1,3 @@
-# scripts/evaluate_with_chemical_generator.py - Fixed evaluation with chemical constraints
 import torch
 import numpy as np
 from pathlib import Path
@@ -18,7 +17,6 @@ from src.models.ddpm_diffusion import MolecularDDPM, MolecularDDPMModel
 from src.data.data_loaders import CrossDockDataLoader
 
 class ChemicallyValidGenerator:
-    """Chemical-aware molecular generator with valence constraints"""
     
     def __init__(self, model=None, ddpm=None, device='cuda'):
         self.model = model
