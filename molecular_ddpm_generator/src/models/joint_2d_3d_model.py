@@ -43,9 +43,7 @@ class ChemicalSpecialist2D(nn.Module):
         # Chemical knowledge embeddings
         self.bond_type_embedding = nn.Embedding(5, 64)
         self.atom_type_embedding = nn.Embedding(11, 64)
-        self.formal_charge_embedding = nn.Embedding(7, 32)
-        self.hybridization_embedding = nn.Embedding(8, 32)
-        
+
         # Valence prediction network
         self.valence_predictor = nn.Sequential(
             nn.Linear(64, 32),
@@ -76,15 +74,10 @@ class ChemicalSpecialist2D(nn.Module):
             nn.ReLU(),
             nn.Linear(128, 32)
         )
-        
-        # Functional group detector
-        self.fg_detector = FunctionalGroupDetector(self.hidden_dim)
-        
-        # Initialize with chemical knowledge
+                
         self._initialize_chemical_knowledge()
         
     def _initialize_chemical_knowledge(self):
-        """Initialize with real chemical valence rules"""
         # Chemical valence rules: C=4, N=3, O=2, S=6, F=1, Cl=1, etc.
         valence_init = torch.tensor([4, 3, 2, 6, 1, 1, 1, 1, 4, 4, 4], dtype=torch.float)
         
@@ -203,57 +196,6 @@ class ChemicalSpecialist2D(nn.Module):
         
         return bond_logits
 
-class FunctionalGroupDetector(nn.Module):
-    """Detect functional groups using graph patterns with chemical constraints"""
-    
-    def __init__(self, hidden_dim):
-        super().__init__()
-        self.hidden_dim = hidden_dim
-        self.pattern_encoders = nn.ModuleDict({
-            'carbonyl': nn.Linear(hidden_dim, 16),
-            'amine': nn.Linear(hidden_dim, 16),
-            'hydroxyl': nn.Linear(hidden_dim, 16),
-            'carboxyl': nn.Linear(hidden_dim, 16),
-            'aromatic': nn.Linear(hidden_dim, 16)
-        })
-        
-        # Chemical pattern constraints
-        self.pattern_constraints = {
-            'carbonyl': {'required_atoms': [0, 2], 'bond_type': 1},  # C=O
-            'amine': {'required_atoms': [0, 1], 'bond_type': 0},     # C-N
-            'hydroxyl': {'required_atoms': [0, 2], 'bond_type': 0},  # C-O
-        }
-        
-    def forward(self, h, edge_index, edge_attr):
-        fg_features = []
-        
-        for pattern_name, encoder in self.pattern_encoders.items():
-            # Apply chemical constraints to pattern detection
-            pattern_feat = encoder(h)
-            
-            # Chemical pattern validation
-            if pattern_name in self.pattern_constraints:
-                pattern_feat = self._apply_pattern_constraints(pattern_feat, pattern_name, h, edge_index)
-            
-            pattern_pooled = torch.mean(pattern_feat, dim=0, keepdim=True)
-            fg_features.append(pattern_pooled.expand(h.size(0), -1))
-        
-        return torch.cat(fg_features, dim=-1)
-    
-    def _apply_pattern_constraints(self, pattern_feat, pattern_name, h, edge_index):
-        """Apply chemical constraints to pattern detection"""
-        constraints = self.pattern_constraints[pattern_name]
-        
-        # Simple constraint application (can be enhanced)
-        if edge_index.size(1) > 0:
-            # Boost features for atoms that can form this pattern
-            for atom_idx in range(h.size(0)):
-                # This is a simplified constraint - in practice you'd check actual connectivity
-                pattern_feat[atom_idx] = pattern_feat[atom_idx] * 1.1  # Slight boost
-        
-        return pattern_feat
-
-
 class PhysicalSpecialist3D(nn.Module):
     """3D processing with CORRECTED SE(3) Equivariant EGNN"""
     
@@ -351,9 +293,7 @@ class ComplementaryFusion(nn.Module):
         # Cross-attention with chemical bias
         self.chemical_to_physical = nn.MultiheadAttention(self.hidden_dim, num_heads=8, batch_first=True)
         self.physical_to_chemical = nn.MultiheadAttention(self.hidden_dim, num_heads=8, batch_first=True)
-        
-        # Chemical-physical consistency enforcer
-        self.consistency_enforcer = ChemicalPhysicalConsistencyEnforcer(hidden_dim)
+
         
         # Feature fusion with constraint awareness
         self.fusion = nn.Sequential(
@@ -422,45 +362,6 @@ class ComplementaryFusion(nn.Module):
             'chemical_violations': chemical_output.get('valence_violations', 0.0)
         }
 
-
-class ChemicalPhysicalConsistencyEnforcer(nn.Module):
-    """Enforce consistency between chemical and physical representations"""
-    
-    def __init__(self, hidden_dim):
-        super().__init__()
-        self.hidden_dim = hidden_dim
-        
-        # Chemical-physical alignment
-        self.chemical_aligner = nn.Sequential(
-            nn.Linear(hidden_dim + 8, hidden_dim),  # +8 for valence info
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim)
-        )
-        
-        self.physical_aligner = nn.Sequential(
-            nn.Linear(hidden_dim + 3, hidden_dim),  # +3 for force info
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim)
-        )
-    
-    def forward(self, h_chem, h_phys, chemical_output):
-        """Enforce chemical-physical consistency"""
-        # Get valence information
-        valence_preds = chemical_output.get('valence_predictions', 
-                                          torch.zeros(h_chem.size(0), 8, device=h_chem.device))
-        
-        # Align chemical features with valence constraints
-        chem_input = torch.cat([h_chem, valence_preds], dim=-1)
-        h_chem_aligned = self.chemical_aligner(chem_input)
-        
-        # Align physical features (assuming forces are available)
-        force_placeholder = torch.zeros(h_phys.size(0), 3, device=h_phys.device)
-        phys_input = torch.cat([h_phys, force_placeholder], dim=-1)
-        h_phys_aligned = self.physical_aligner(phys_input)
-        
-        return h_chem_aligned, h_phys_aligned
-
-
 class Joint2D3DModel(MolecularModel):
     """Enhanced Joint 2D-3D Molecular Model with integrated chemical constraints"""
     
@@ -507,17 +408,10 @@ class Joint2D3DModel(MolecularModel):
             self.condition_transform = nn.Identity()
         else:
             self.condition_transform = nn.Linear(pocket_dim, self.hidden_dim)
-        
-        # Output heads with chemical awareness
-        self.atom_type_head = ChemicalAtomPredictor(self.hidden_dim, atom_types)
-        self.bond_type_head = ChemicalBondPredictor(self.hidden_dim, bond_types)
+
         self.position_head = nn.Linear(self.hidden_dim, 3)
-        
-        # Chemical loss computer
-        self.chemical_loss_computer = ChemicalLossComputer()
-        
-        print(f"✅ Enhanced Joint2D3DModel with Chemical Constraints initialized!")
-        
+
+            
     def forward(self, x, pos, edge_index, edge_attr, batch,
                 pocket_x=None, pocket_pos=None, pocket_edge_index=None, 
                 pocket_batch=None, **kwargs):
@@ -544,20 +438,15 @@ class Joint2D3DModel(MolecularModel):
         if pocket_condition is not None:
             h_final = self._apply_conditioning(h_final, pocket_condition, batch)
         
-        # Chemical-aware predictions
-        atom_logits = self.atom_type_head(h_final, chemical_output)
-        bond_logits = self.bond_type_head(h_final, edge_index, chemical_output)
         pos_pred = physical_output['updated_positions'] + self.position_head(h_final)
         
         # Compute chemical constraint losses
         constraint_losses = self.chemical_loss_computer(
-            chemical_output, fusion_output, atom_logits, bond_logits, edge_index
+            chemical_output, fusion_output, edge_index
         )
         
         return {
-            'atom_logits': atom_logits,
             'pos_pred': pos_pred,
-            'bond_logits': bond_logits,
             'node_features': h_final,
             'chemical_properties': chemical_output['chemical_properties'],
             'physical_forces': fusion_output['forces'],
@@ -617,91 +506,6 @@ class Joint2D3DModel(MolecularModel):
         broadcasted_condition = pocket_transformed[batch_safe]
         
         return atom_features + broadcasted_condition
-
-
-class ChemicalAtomPredictor(nn.Module):
-    """Atom type predictor with chemical awareness"""
-    
-    def __init__(self, hidden_dim, num_atom_types):
-        super().__init__()
-        self.predictor = nn.Sequential(
-            nn.Linear(hidden_dim + 8, hidden_dim),  # +8 for valence info
-            nn.ReLU(),
-            nn.Linear(hidden_dim, num_atom_types)
-        )
-    
-    def forward(self, features, chemical_output):
-        # Combine features with chemical information
-        valence_info = chemical_output.get('valence_predictions', 
-                                         torch.zeros(features.size(0), 8, device=features.device))
-        combined = torch.cat([features, valence_info], dim=-1)
-        return self.predictor(combined)
-
-
-class ChemicalBondPredictor(nn.Module):
-    """Bond type predictor with chemical constraints"""
-    
-    def __init__(self, hidden_dim, num_bond_types):
-        super().__init__()
-        self.predictor = nn.Sequential(
-            nn.Linear(hidden_dim * 2 + 2, hidden_dim),  # +2 for valences
-            nn.ReLU(),
-            nn.Linear(hidden_dim, num_bond_types)
-        )
-    
-    def forward(self, features, edge_index, chemical_output):
-        if edge_index.size(1) == 0:
-            return torch.zeros((0, 4), device=features.device)
-        
-        row, col = edge_index
-        valences = chemical_output.get('predicted_valences', 
-                                     torch.ones(features.size(0), device=features.device))
-        
-        edge_features = torch.cat([
-            features[row], features[col],
-            valences[row].float().unsqueeze(1),
-            valences[col].float().unsqueeze(1)
-        ], dim=-1)
-        
-        return self.predictor(edge_features)
-
-
-class ChemicalLossComputer(nn.Module):
-    """Compute chemical constraint losses"""
-    
-    def __init__(self):
-        super().__init__()
-        self.valence_rules = {0: 4, 1: 3, 2: 2, 3: 6, 4: 1, 5: 1, 6: 1, 7: 1, 8: 4, 9: 4, 10: 4}
-    
-    def forward(self, chemical_output, fusion_output, atom_logits, bond_logits, edge_index):
-        """Compute all chemical constraint losses"""
-        losses = {}
-        
-        # Valence consistency loss (from chemical processing)
-        losses['valence_consistency'] = chemical_output.get('valence_violations', torch.tensor(0.0))
-        
-        # Bond type consistency loss
-        bond_consistency = self._compute_bond_consistency_loss(bond_logits, edge_index)
-        losses['bond_consistency'] = bond_consistency
-        
-        # Atom-valence compatibility loss
-        atom_valence_compat = self._compute_atom_valence_compatibility(
-            atom_logits, chemical_output.get('predicted_valences')
-        )
-        losses['atom_valence_compatibility'] = atom_valence_compat
-        
-        # Chemical-physical consistency loss
-        chem_phys_consistency = fusion_output.get('consistency_score', torch.tensor(1.0))
-        if isinstance(chem_phys_consistency, torch.Tensor):
-            # Penalize low consistency (should be close to 1)
-            consistency_loss = F.mse_loss(chem_phys_consistency, torch.ones_like(chem_phys_consistency))
-            losses['chemical_physical_consistency'] = consistency_loss
-        
-        # Overall chemical violations
-        chemical_violations = fusion_output.get('chemical_violations', torch.tensor(0.0))
-        losses['overall_chemical_violations'] = chemical_violations
-        
-        return losses
     
     def _compute_bond_consistency_loss(self, bond_logits, edge_index):
         """Compute bond type consistency loss"""

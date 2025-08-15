@@ -1,0 +1,278 @@
+# config/egnn_training_config.yaml - Updated for Joint2D3D + ImprovedPocketEncoder
+# Data configuration
+data:
+  train_path: "data/processed_full/train_generation.pkl"
+  val_path: "data/processed_full/test_generation.pkl"
+  test_path: "data/processed_full/test_generation.pkl"
+  batch_size: 16
+  num_workers: 4
+  pin_memory: true
+  shuffle: true
+  include_pocket: true
+  augment: true
+  max_atoms: 50
+
+# Model architecture - Updated for Joint2D3D + ImprovedPocketEncoder
+model:
+  atom_types: 11
+  bond_types: 4
+  hidden_dim: 256
+  pocket_dim: 256
+  num_layers: 6
+  max_radius: 10.0
+  max_pocket_atoms: 1000
+  conditioning_type: "add"
+  
+  # 🔄 NEW: Smart pocket selection strategy
+  pocket_selection_strategy: "adaptive"  # Options: "adaptive", "distance", "surface", "residue", "binding_site"
+  
+  # 🔄 NEW: Enhanced interaction parameters
+  interaction_radius: 8.0
+  surface_probe_radius: 1.4
+  
+  # Model backend selection
+  use_improved_pocket_encoder: true
+  pocket_encoder_type: "improved"  # "improved" or "enhanced"
+
+# DDPM diffusion parameters
+ddpm:
+  num_timesteps: 1000
+  beta_schedule: "cosine"
+  beta_start: 0.0001
+  beta_end: 0.02
+  loss_type: "mse"
+  sampling_method: "ddpm"
+  clip_denoised: true
+  
+  # 🔄 Enhanced diffusion parameters
+  rescale_betas_zero_snr: false
+  clip_sample: true
+  clip_sample_range: 1.0
+  prediction_type: "epsilon"
+  timestep_spacing: "leading"
+
+# Training configuration
+training:
+  num_epochs: 100
+  learning_rate: 0.0001
+  weight_decay: 0.0001
+  grad_clip_norm: 1.0
+  gradient_accumulation_steps: 1
+  use_amp: true
+  amp_dtype: "float16"
+  
+  # 🔄 Enhanced training parameters
+  warmup_epochs: 5
+  
+  scheduler:
+    type: "cosine_annealing"
+    T_max: 100
+    eta_min: 0.00001
+    warmup_epochs: 5
+    warmup_lr: 0.00001
+
+# Optimizer configuration (FIXED TYPES)
+optimizer:
+  type: "adamw"
+  lr: 0.0001
+  betas: [0.9, 0.999]
+  weight_decay: 0.0001
+  eps: 0.00000001
+
+# Loss weights - Enhanced for Joint2D3D
+loss_weights:
+  noise_loss: 1.0
+  atom_type_loss: 0.1
+  bond_type_loss: 0.1
+  geometry_loss: 0.05
+  position_loss: 1.0
+  pocket_conditioning_loss: 0.02
+
+# Logging configuration
+logging:
+  project_name: "joint2d3d-ddpm-improved-pocket"
+  experiment_name: "ddpm-smart-pocket-selection"
+  log_every_n_steps: 50
+  val_check_interval: 1000
+  save_top_k: 3
+  save_path: "models/joint2d3d_ddpm/"
+  use_wandb: false  # Set to true if you want W&B logging
+  wandb_tags: ["joint2d3d", "ddpm", "improved-pocket", "smart-selection"]
+  visualize_molecules: true
+  viz_frequency: 10
+  num_viz_samples: 8
+
+# Early stopping
+early_stopping:
+  monitor: "val_total_loss"
+  patience: 15
+  min_delta: 0.001
+  mode: "min"
+
+# Model checkpointing
+checkpointing:
+  monitor: "val_total_loss"
+  save_best_only: true
+  save_last: true
+  mode: "min"
+  filename: "joint2d3d-ddpm-epoch-{epoch:02d}-loss-{val_total_loss:.4f}"
+
+# Generation/Sampling configuration
+generation:
+  num_molecules: 100
+  max_atoms: 50
+  guidance_scale: 1.0
+  num_sampling_steps: 1000
+  eta: 0.0
+  use_pocket_conditioning: true
+  pocket_guidance_weight: 1.0
+  
+  # 🔄 Smart pocket selection for generation
+  use_smart_pocket_selection: true
+  generation_pocket_strategy: "binding_site"
+
+# Memory optimization
+memory_optimization:
+  gradient_checkpointing: false
+  max_batch_size_auto_tune: false
+  empty_cache_every_n_steps: 100
+  max_pocket_atoms_per_batch: 500
+  smart_pocket_selection: true
+  
+  # 🔄 Enhanced memory settings for improved encoder
+  pocket_batch_size_limit: 200
+  enable_atom_selection_caching: true
+
+# Hardware configuration
+hardware:
+  device: "auto"
+  precision: "mixed"
+  deterministic: false
+  benchmark: true
+
+# Reproducibility
+seed: 42
+deterministic: false
+
+# Advanced DDPM options
+advanced_ddpm:
+  rescale_betas_zero_snr: false
+  clip_sample: true
+  clip_sample_range: 1.0
+  prediction_type: "epsilon"
+  timestep_spacing: "leading"
+  use_karras_sigmas: false
+  sigma_min: 0.002
+  sigma_max: 80.0
+
+# Validation configuration
+validation:
+  val_frequency: 1
+  num_val_samples: 100
+  compute_metrics: true
+  metrics:
+    - "validity"
+    - "uniqueness" 
+    - "drug_likeness"
+    - "pocket_binding_affinity"  # 🔄 New metric
+
+# Dataset-specific settings
+dataset_config:
+  crossdock_version: "pocket10"
+  use_split_by_name: true
+  center_molecules: true
+  normalize_positions: false
+  add_hydrogens: false
+  rotation_augmentation: true
+  noise_augmentation: true
+  noise_scale: 0.1
+  
+  # 🔄 Enhanced data settings
+  pocket_augmentation: true
+  ligand_pocket_alignment: true
+
+# Debugging and development
+debug:
+  enable_debug_mode: false
+  debug_batches: 10
+  profile_training: false
+  check_gradients: false
+  visualize_first_batch: true
+  print_model_summary: true
+  log_memory_usage: false
+  
+  # 🔄 Enhanced debugging for pocket selection
+  debug_pocket_selection: false
+  log_pocket_selection_stats: true
+  visualize_pocket_selection: false
+
+# 🔄 NEW: Smart Pocket Selection Configuration
+pocket_selection:
+  # Strategy options: "adaptive", "distance", "surface", "residue", "binding_site"
+  default_strategy: "adaptive"
+  
+  # Strategy-specific parameters
+  distance_based:
+    primary_radius: 6.0      # Å - Primary binding zone
+    secondary_radius: 12.0   # Å - Extended zone
+    max_radius: 15.0         # Å - Maximum cutoff
+  
+  surface_based:
+    probe_radius: 1.4        # Å - Water probe radius
+    neighbor_radius: 5.0     # Å - Neighbor analysis
+    hydrophilic_bonus: 1.2   # Bonus for hydrophilic residues
+  
+  residue_based:
+    druggability_weights: true
+    surface_accessibility_weight: 1.5
+    distance_weight: 2.0
+  
+  binding_site:
+    direct_contact_radius: 3.5    # Å - Direct contact
+    extended_radius: 8.0          # Å - Extended interaction
+    chemical_property_bonus: true
+  
+  adaptive:
+    prefer_binding_site: true
+    fallback_to_distance: true
+    hybrid_selection: true
+
+# 🔄 NEW: Model Architecture Details
+architecture:
+  joint2d3d:
+    use_egnn: true
+    egnn_edge_dim: 4
+    egnn_fourier_features_2d: 0
+    egnn_fourier_features_3d: 8
+    egnn_num_neighbors: 32
+    egnn_dropout: 0.1
+    
+  fusion:
+    type: "enhanced"
+    use_residual: true
+    use_layer_norm: true
+    
+  conditioning:
+    type: "add"  # "add", "concat", "gated"
+    pocket_dim_match_hidden: true
+
+# 🔄 NEW: Training Monitoring
+monitoring:
+  track_pocket_selection_efficiency: true
+  log_atom_selection_statistics: true
+  monitor_egnn_gradient_flow: false
+  track_se3_equivariance: false  # Expensive, use only for debugging
+  
+  selection_metrics:
+    - "atoms_selected_per_pocket"
+    - "selection_time_ms"
+    - "strategy_usage_distribution"
+    - "binding_site_coverage"
+
+# 🔄 NEW: Hyperparameter Ranges (for future hyperparameter tuning)
+hyperparameter_ranges:
+  learning_rate: [0.00005, 0.0005]
+  hidden_dim: [128, 256, 512]
+  num_layers: [4, 6, 8]
+  pocket_selection_strategy: ["adaptive", "binding_site", "surface"]
+  max_pocket_atoms: [500, 1000, 1500]
