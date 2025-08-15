@@ -137,8 +137,3 @@ def collate_crossdock_data(batch):
         mol_batch.pocket_batch = pocket_batch.batch
     
     return mol_batch
-
-# Legacy dataset for backward compatibility
-class MolecularDataset(CrossDockMolecularDataset):
-    """Legacy molecular dataset class"""
-    pass

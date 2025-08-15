@@ -91,14 +91,10 @@ class ChemicalSpecialist2D(nn.Module):
     def forward(self, x, edge_index, edge_attr, batch):
         # Extract chemical features (no spatial coordinates)
         atom_types = x[:, 0].long().clamp(0, 10)
-        formal_charges = (x[:, 2].long() + 3).clamp(0, 6) if x.size(1) > 2 else torch.zeros_like(atom_types)
-        hybridization = x[:, 1].long().clamp(0, 7) if x.size(1) > 1 else torch.zeros_like(atom_types)
-        
+
         # Chemical embeddings
         atom_emb = self.atom_type_embedding(atom_types)
-        charge_emb = self.formal_charge_embedding(formal_charges)
-        hybrid_emb = self.hybridization_embedding(hybridization)
-        
+
         # Predict valence for each atom with chemical knowledge
         valence_logits = self.valence_predictor(atom_emb)
         predicted_valences = torch.argmax(valence_logits, dim=-1) + 1  # 1-8 valence
@@ -113,8 +109,6 @@ class ChemicalSpecialist2D(nn.Module):
         # Combine chemical features with valence information
         h_chemical = torch.cat([
             atom_emb, 
-            charge_emb, 
-            hybrid_emb,
             F.one_hot(predicted_valences - 1, 8).float()  # Valence encoding
         ], dim=-1)
         
@@ -140,12 +134,10 @@ class ChemicalSpecialist2D(nn.Module):
         
         # Chemical analysis
         chemical_props = self.chemical_properties(h_chemical)
-        fg_features = self.fg_detector(h_chemical, edge_index, edge_attr)
         
         return {
             'chemical_features': h_chemical,
             'chemical_properties': chemical_props,
-            'functional_groups': fg_features,
             'atom_types': atom_types,
             'valence_predictions': valence_logits,
             'predicted_valences': predicted_valences,

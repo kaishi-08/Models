@@ -6,6 +6,7 @@ from rdkit.Chem import AllChem, Descriptors, rdMolDescriptors
 from typing import List, Dict, Any, Optional, Tuple
 import networkx as nx
 from torch_geometric.utils import to_networkx
+from torch import nn
 
 class MolecularFeaturizer:
     """Utility class for molecular featurization"""
@@ -260,3 +261,127 @@ class MolecularConverter:
             }
         except:
             return None
+
+class ValenceConstraintLayer(nn.Module):
+    """Layer that enforces valence constraints"""
+    
+    def __init__(self):
+        super().__init__()
+        # Chemical valence rules
+        self.max_valences = {0: 4, 1: 3, 2: 2, 3: 6, 4: 1, 5: 1, 6: 1, 7: 1, 8: 4, 9: 4, 10: 4}
+    
+    def forward(self, h, edge_index, predicted_valences, atom_types):
+        """Enforce valence constraints and compute violations"""
+        if edge_index.size(1) == 0:
+            return h, torch.tensor(0.0, device=h.device)
+        
+        # Count current bonds per atom
+        row, col = edge_index
+        bond_counts = torch.zeros(h.size(0), device=h.device)
+        bond_counts.index_add_(0, row, torch.ones(row.size(0), device=h.device))
+        
+        # Compute valence violations
+        violations = 0.0
+        violation_mask = torch.zeros(h.size(0), device=h.device)
+        
+        for i, (atom_type, predicted_val, bond_count) in enumerate(zip(atom_types, predicted_valences, bond_counts)):
+            max_allowed = self.max_valences.get(atom_type.item(), 4)
+            
+            if bond_count > max_allowed:
+                violation = bond_count - max_allowed
+                violations += violation ** 2
+                violation_mask[i] = violation
+        
+        # Modify features for atoms with violations (chemical penalty)
+        h = h * (1.0 - 0.1 * violation_mask.unsqueeze(1))  # Reduce feature magnitude for violating atoms
+        
+        return h, violations / h.size(0)
+
+
+class BondConstraintLayer(nn.Module):
+    """Layer that enforces bond type constraints"""
+    
+    def __init__(self):
+        super().__init__()
+    
+    def forward(self, bond_logits, edge_index, atom_types):
+        """Enforce bond type constraints"""
+        if bond_logits.size(0) == 0:
+            return bond_logits, torch.tensor(0.0, device=bond_logits.device)
+        
+        row, col = edge_index
+        violations = 0.0
+        
+        # Chemical bond type constraints
+        for i, (atom1, atom2) in enumerate(zip(row, col)):
+            atom1_type = atom_types[atom1].item()
+            atom2_type = atom_types[atom2].item()
+            
+            # Fluorine (4) can only form single bonds
+            if atom1_type == 4 or atom2_type == 4:
+                bond_logits[i, 1:] -= 100.0  # Heavy penalty for non-single bonds
+                violations += torch.sum(torch.relu(bond_logits[i, 1:]))
+            
+            # Chlorine (5) typically single bonds
+            if atom1_type == 5 or atom2_type == 5:
+                bond_logits[i, 2:] -= 50.0  # Penalty for triple bonds
+        
+        return bond_logits, violations / bond_logits.size(0)
+
+class ChemicalConstraintGNN(nn.Module):
+    """GNN layer with chemical constraint awareness"""
+    
+    def __init__(self, hidden_dim):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        
+        # Message function with valence awareness
+        self.message_mlp = nn.Sequential(
+            nn.Linear(hidden_dim * 2 + 2, hidden_dim),  # +2 for valences
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim)
+        )
+        
+        # Update function with chemical constraints
+        self.update_mlp = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim)
+        )
+        
+        # Valence-aware attention
+        self.valence_attention = nn.Sequential(
+            nn.Linear(2, 16),
+            nn.ReLU(),
+            nn.Linear(16, 1),
+            nn.Sigmoid()
+        )
+    
+    def forward(self, h, edge_index, edge_attr, valences):
+        """Forward pass with chemical constraints"""
+        if edge_index.size(1) == 0:
+            return h
+        
+        row, col = edge_index
+        
+        # Valence-aware attention weights
+        valence_pairs = torch.stack([valences[row].float(), valences[col].float()], dim=-1)
+        attention_weights = self.valence_attention(valence_pairs)
+        
+        # Messages with valence information
+        messages = torch.cat([
+            h[row], h[col], 
+            valences[row].float().unsqueeze(1),
+            valences[col].float().unsqueeze(1)
+        ], dim=-1)
+        
+        messages = self.message_mlp(messages) * attention_weights
+        
+        # Aggregate messages
+        h_agg = torch.zeros_like(h)
+        h_agg.index_add_(0, row, messages)
+        
+        # Update with chemical awareness
+        h_new = self.update_mlp(torch.cat([h, h_agg], dim=-1))
+        
+        return h + h_new 

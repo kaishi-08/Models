@@ -214,7 +214,7 @@ class GenerationFocusedPreprocessor:
             
             atom_features.append(features)
             
-            # 3D coordinates (essential for SDE)
+            # 3D coordinates 
             pos = conf.GetAtomPosition(atom.GetIdx())
             positions.append([pos.x, pos.y, pos.z])
         
@@ -253,10 +253,6 @@ class GenerationFocusedPreprocessor:
         }
     
     def pdb_to_ca_features(self, pdb_file):
-        """
-        Convert PDB to Cα-only representation (like DiffSBDD)
-        This is the standard approach in generation models
-        """
         try:
             parser = PDBParser(QUIET=True)
             structure = parser.get_structure('pocket', pdb_file)
