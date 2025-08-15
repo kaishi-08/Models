@@ -1,4 +1,4 @@
-# src/models/ddpm_diffusion.py - FIXED parameter assignment issue
+# src/models/ddpm_diffusion.py - Enhanced with Chemical Constraints
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -10,10 +10,17 @@ class MolecularDDPM(nn.Module):
                  num_timesteps: int = 1000,
                  beta_schedule: str = "cosine",
                  beta_start: float = 0.0001,
-                 beta_end: float = 0.02):
+                 beta_end: float = 0.02,
+                 chemical_weight: float = 0.1,
+                 valence_weight: float = 0.05):
         super().__init__()
         
         self.num_timesteps = num_timesteps
+        self.chemical_weight = chemical_weight
+        self.valence_weight = valence_weight
+        
+        # Chemical knowledge
+        self.valence_rules = {0: 4, 1: 3, 2: 2, 3: 6, 4: 1, 5: 1, 6: 1, 7: 1, 8: 4, 9: 4, 10: 4}
         
         # Create beta schedule
         if beta_schedule == "cosine":
@@ -71,9 +78,6 @@ class MolecularDDPM(nn.Module):
     def compute_loss(self, model, x0: torch.Tensor, **model_kwargs):
         device = x0.device
         num_atoms = x0.size(0)
-        
-        # 🎯 FIX: Sample single timestep for all atoms in batch
-        # (Later can be improved for proper batching)
         t = torch.randint(0, self.num_timesteps, (1,), device=device)
         
         try:
@@ -86,30 +90,28 @@ class MolecularDDPM(nn.Module):
             # Prepare model inputs with device safety
             model_inputs = self._prepare_model_inputs(x_t, t, model_kwargs, device)
             
-            # Predict noise
-            noise_pred = model(**model_inputs)
+            # Predict noise with chemical awareness
+            model_output = model(**model_inputs)
             
-            # Handle different output formats
-            if isinstance(noise_pred, dict):
-                if 'pos_pred' in noise_pred:
-                    noise_pred = noise_pred['pos_pred']
-                elif 'noise_pred' in noise_pred:
-                    noise_pred = noise_pred['noise_pred']
-                else:
-                    noise_pred = next(iter(noise_pred.values()))
-            # Scale up the predictions
+            # Extract noise prediction and chemical information
+            if isinstance(model_output, dict):
+                noise_pred = model_output.get('pos_pred', model_output.get('noise_pred'))
+                chemical_info = self._extract_chemical_info(model_output)
+            else:
+                noise_pred = model_output
+                chemical_info = {}
+            
+            # Primary DDPM loss
             pred_std = noise_pred.std()
             noise_std = noise.std()
             
             if pred_std > 0:
                 scale_factor = noise_std / pred_std
-                # Apply gradual scaling to avoid instability
                 scale_factor = torch.clamp(scale_factor, 0.1, 10.0)
                 noise_pred = noise_pred * scale_factor
             
             # Ensure shapes match
             if noise_pred.shape != noise.shape:
-                print(f"Warning: Shape mismatch. noise: {noise.shape}, pred: {noise_pred.shape}")
                 if noise_pred.size(0) == noise.size(0):
                     if noise_pred.dim() == 1:
                         noise_pred = noise_pred.view(-1, 1).expand_as(noise)
@@ -117,14 +119,27 @@ class MolecularDDPM(nn.Module):
                         noise_pred = noise_pred[:, :noise.size(1)]
             
             # Compute MSE loss
-            loss = F.mse_loss(noise_pred, noise)
+            ddpm_loss = F.mse_loss(noise_pred, noise)
             
-            return loss, {
-                'noise_loss': loss.item(),
+            # Chemical constraint losses
+            chemical_losses = self._compute_chemical_losses(chemical_info, model_kwargs)
+            
+            # Total loss with chemical constraints
+            total_loss = ddpm_loss + self.chemical_weight * chemical_losses['total_chemical_loss']
+            
+            # Prepare loss dictionary
+            loss_dict = {
+                'noise_loss': ddpm_loss.item(),
                 'pred_std': pred_std.item(),
                 'noise_std': noise_std.item(),
-                'scale_factor': scale_factor.item() if isinstance(scale_factor, torch.Tensor) else scale_factor
+                'scale_factor': scale_factor.item() if isinstance(scale_factor, torch.Tensor) else scale_factor,
+                'chemical_loss': chemical_losses['total_chemical_loss'].item() if isinstance(chemical_losses['total_chemical_loss'], torch.Tensor) else chemical_losses['total_chemical_loss'],
+                'valence_loss': chemical_losses.get('valence_loss', 0.0),
+                'bond_loss': chemical_losses.get('bond_loss', 0.0),
+                'total_loss': total_loss.item()
             }
+            
+            return total_loss, loss_dict
             
         except Exception as e:
             print(f"DDPM compute_loss error: {e}")
@@ -132,7 +147,104 @@ class MolecularDDPM(nn.Module):
             
             # Return dummy loss to continue training
             dummy_loss = torch.tensor(1.0, device=device, requires_grad=True)
-            return dummy_loss, {'noise_loss': 1.0}
+            return dummy_loss, {'noise_loss': 1.0, 'chemical_loss': 0.0}
+    
+    def _extract_chemical_info(self, model_output):
+        """Extract chemical information from model output"""
+        chemical_info = {}
+        
+        # Extract chemical features
+        if 'atom_logits' in model_output:
+            chemical_info['atom_logits'] = model_output['atom_logits']
+        if 'bond_logits' in model_output:
+            chemical_info['bond_logits'] = model_output['bond_logits']
+        if 'valence_predictions' in model_output:
+            chemical_info['valence_predictions'] = model_output['valence_predictions']
+        if 'predicted_valences' in model_output:
+            chemical_info['predicted_valences'] = model_output['predicted_valences']
+        if 'chemical_violations' in model_output:
+            chemical_info['chemical_violations'] = model_output['chemical_violations']
+        
+        return chemical_info
+    
+    def _compute_chemical_losses(self, chemical_info, model_kwargs):
+        """Compute chemical constraint losses"""
+        losses = {'total_chemical_loss': 0.0}
+        
+        # Valence constraint loss
+        valence_loss = self._compute_valence_loss(chemical_info, model_kwargs)
+        losses['valence_loss'] = valence_loss
+        losses['total_chemical_loss'] += self.valence_weight * valence_loss
+        
+        # Bond type constraint loss
+        bond_loss = self._compute_bond_loss(chemical_info, model_kwargs)
+        losses['bond_loss'] = bond_loss
+        losses['total_chemical_loss'] += 0.05 * bond_loss
+        
+        # Chemical violations from model
+        if 'chemical_violations' in chemical_info:
+            violations = chemical_info['chemical_violations']
+            if isinstance(violations, torch.Tensor):
+                losses['total_chemical_loss'] += 0.1 * violations.mean()
+        
+        return losses
+    
+    def _compute_valence_loss(self, chemical_info, model_kwargs):
+        """Compute valence constraint loss"""
+        if 'atom_logits' not in chemical_info or 'edge_index' not in model_kwargs:
+            return torch.tensor(0.0)
+        
+        atom_logits = chemical_info['atom_logits']
+        edge_index = model_kwargs['edge_index']
+        
+        if edge_index.size(1) == 0 or atom_logits.size(0) == 0:
+            return torch.tensor(0.0)
+        
+        try:
+            # Predict atom types
+            predicted_atoms = torch.argmax(atom_logits, dim=-1)
+            
+            # Count bonds per atom
+            row, col = edge_index
+            bond_counts = torch.zeros(atom_logits.size(0), device=atom_logits.device)
+            bond_counts.index_add_(0, row, torch.ones(row.size(0), device=atom_logits.device))
+            
+            # Compute valence violations
+            violations = 0.0
+            for i, (atom_type, bond_count) in enumerate(zip(predicted_atoms, bond_counts)):
+                max_valence = self.valence_rules.get(atom_type.item(), 4)
+                if bond_count > max_valence:
+                    violations += (bond_count - max_valence) ** 2
+            
+            return violations / atom_logits.size(0) if atom_logits.size(0) > 0 else torch.tensor(0.0)
+            
+        except Exception as e:
+            return torch.tensor(0.0)
+    
+    def _compute_bond_loss(self, chemical_info, model_kwargs):
+        """Compute bond constraint loss"""
+        if 'bond_logits' not in chemical_info:
+            return torch.tensor(0.0)
+        
+        bond_logits = chemical_info['bond_logits']
+        
+        if bond_logits.size(0) == 0:
+            return torch.tensor(0.0)
+        
+        try:
+            # Penalize excessive high-order bonds
+            bond_probs = torch.softmax(bond_logits, dim=-1)
+            
+            # Triple bonds should be rare
+            triple_bond_penalty = bond_probs[:, 2].mean() * 2.0 if bond_probs.size(1) > 2 else 0.0
+            
+            # Too many double bonds penalty
+            double_bond_penalty = torch.clamp(bond_probs[:, 1].mean() - 0.3, min=0.0) if bond_probs.size(1) > 1 else 0.0
+            
+            return triple_bond_penalty + double_bond_penalty
+            
+        except Exception as e:
+            return torch.tensor(0.0)
     
     def _prepare_model_inputs(self, x_t: torch.Tensor, t: torch.Tensor, 
                              model_kwargs: Dict[str, Any], device: torch.device) -> Dict[str, Any]:
@@ -186,6 +298,9 @@ class MolecularDDPMModel(nn.Module):
             nn.Linear(256, hidden_dim)
         )
         
+        # Chemical constraint integration
+        self.chemical_integrator = ChemicalConstraintIntegrator(hidden_dim)
+        
         self.register_parameter('output_scale', nn.Parameter(torch.tensor(1.0)))
     
     def forward(self, **kwargs):
@@ -206,24 +321,30 @@ class MolecularDDPMModel(nn.Module):
             # Call base model with all kwargs
             outputs = self.base_model(**kwargs)
             
+            # Apply chemical constraints and integration
+            enhanced_outputs = self._integrate_chemical_constraints(outputs, kwargs)
+            
             # Get position prediction
-            if isinstance(outputs, dict):
-                if 'pos_pred' in outputs:
-                    pos_pred = outputs['pos_pred']
-                elif 'positions' in outputs:
-                    pos_pred = outputs['positions']
+            if isinstance(enhanced_outputs, dict):
+                if 'pos_pred' in enhanced_outputs:
+                    pos_pred = enhanced_outputs['pos_pred']
+                elif 'positions' in enhanced_outputs:
+                    pos_pred = enhanced_outputs['positions']
                 else:
-                    pos_pred = outputs.get('node_features', pos)
+                    pos_pred = enhanced_outputs.get('node_features', pos)
             else:
-                pos_pred = outputs
+                pos_pred = enhanced_outputs
             
             if pos_pred is not None:
                 # Ensure gradients are preserved
                 if not pos_pred.requires_grad and pos_pred.dtype == torch.float:
                     pos_pred = pos_pred.requires_grad_(True)
                 
+                # Apply chemical guidance to position prediction
+                guided_pos = self.chemical_integrator(pos_pred, enhanced_outputs)
+                
                 # Apply learnable scaling
-                scaled_output = pos_pred * self.output_scale * 3.0  # Reduced from 5.0
+                scaled_output = guided_pos * self.output_scale * 3.0
                 
                 # Ensure output requires gradients
                 if not scaled_output.requires_grad:
@@ -231,7 +352,7 @@ class MolecularDDPMModel(nn.Module):
                 
                 return scaled_output
             else:
-                # 🔧 FIXED: Return output with gradients
+                # Return fallback with chemical bias
                 if pos is not None:
                     output = torch.randn_like(pos, requires_grad=True) * 1.5
                 elif x is not None:
@@ -254,6 +375,66 @@ class MolecularDDPMModel(nn.Module):
             else:
                 return torch.randn(1, 3, requires_grad=True) * 1.5
     
+    def _integrate_chemical_constraints(self, outputs, kwargs):
+        """Integrate chemical constraints into model outputs"""
+        if not isinstance(outputs, dict):
+            return outputs
+        
+        # Extract chemical information from base model
+        enhanced_outputs = outputs.copy()
+        
+        # Add valence predictions if not present
+        if 'atom_logits' in outputs and 'valence_predictions' not in outputs:
+            atom_logits = outputs['atom_logits']
+            valence_predictions = self._predict_valences(atom_logits)
+            enhanced_outputs['valence_predictions'] = valence_predictions
+            enhanced_outputs['predicted_valences'] = torch.argmax(valence_predictions, dim=-1) + 1
+        
+        # Compute chemical violations
+        chemical_violations = self._compute_chemical_violations(enhanced_outputs, kwargs)
+        enhanced_outputs['chemical_violations'] = chemical_violations
+        
+        return enhanced_outputs
+    
+    def _predict_valences(self, atom_logits):
+        """Predict valences from atom logits"""
+        # Simple valence prediction based on atom types
+        valence_map = torch.tensor([4, 3, 2, 6, 1, 1, 1, 1, 4, 4, 4], device=atom_logits.device)
+        
+        atom_types = torch.argmax(atom_logits, dim=-1)
+        predicted_valences = valence_map[atom_types.clamp(0, 10)]
+        
+        # Convert to one-hot
+        valence_logits = F.one_hot(predicted_valences - 1, 8).float()
+        
+        return valence_logits
+    
+    def _compute_chemical_violations(self, outputs, kwargs):
+        """Compute chemical violations"""
+        violations = 0.0
+        
+        # Valence violations
+        if 'atom_logits' in outputs and 'edge_index' in kwargs:
+            atom_logits = outputs['atom_logits']
+            edge_index = kwargs['edge_index']
+            
+            if edge_index.size(1) > 0:
+                valence_rules = {0: 4, 1: 3, 2: 2, 3: 6, 4: 1, 5: 1}
+                
+                predicted_atoms = torch.argmax(atom_logits, dim=-1)
+                row, col = edge_index
+                bond_counts = torch.zeros(atom_logits.size(0), device=atom_logits.device)
+                bond_counts.index_add_(0, row, torch.ones(row.size(0), device=atom_logits.device))
+                
+                for atom_type, bond_count in zip(predicted_atoms, bond_counts):
+                    max_valence = valence_rules.get(atom_type.item(), 4)
+                    if bond_count > max_valence:
+                        violations += (bond_count - max_valence) ** 2
+                
+                violations = violations / atom_logits.size(0)
+        
+        return violations
+    
     def _embed_timestep(self, timesteps, dim=128):
         """Sinusoidal timestep embedding"""
         device = timesteps.device
@@ -265,12 +446,10 @@ class MolecularDDPMModel(nn.Module):
         return emb
     
     def to(self, device):
-        # Move base components
         self.base_model = self.base_model.to(device)
         self.time_embedding = self.time_embedding.to(device)
+        self.chemical_integrator = self.chemical_integrator.to(device)
         
-        # 🎯 CRITICAL FIX: Proper parameter device transfer
-        # Don't reassign parameter, just move the whole module
         super().to(device)
         return self
     
@@ -295,3 +474,61 @@ class MolecularDDPMModel(nn.Module):
             else:
                 # Try loading into base model directly
                 self.base_model.load_state_dict(state_dict, strict=False)
+
+
+class ChemicalConstraintIntegrator(nn.Module):
+    """Integrate chemical constraints into position predictions"""
+    
+    def __init__(self, hidden_dim):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        
+        # Chemical guidance network
+        self.chemical_guidance = nn.Sequential(
+            nn.Linear(hidden_dim + 1, 64),  # +1 for violation score
+            nn.ReLU(),
+            nn.Linear(64, 3)  # Position adjustment
+        )
+        
+        # Valence-aware position modifier
+        self.valence_modifier = nn.Sequential(
+            nn.Linear(8 + 3, 32),  # valence one-hot + position
+            nn.Tanh(),
+            nn.Linear(32, 3)
+        )
+    
+    def forward(self, pos_pred, model_outputs):
+        """Apply chemical constraints to position predictions"""
+        try:
+            # Apply chemical violations penalty
+            if 'chemical_violations' in model_outputs:
+                violations = model_outputs['chemical_violations']
+                if isinstance(violations, torch.Tensor) and violations.numel() > 0:
+                    node_features = model_outputs.get('node_features')
+                    if node_features is not None:
+                        # Create violation score for each atom
+                        if violations.dim() == 0:
+                            violation_scores = violations.expand(node_features.size(0), 1)
+                        else:
+                            violation_scores = violations.unsqueeze(-1)
+                        
+                        # Chemical guidance
+                        guidance_input = torch.cat([node_features, violation_scores], dim=-1)
+                        chemical_adjustment = self.chemical_guidance(guidance_input)
+                        
+                        # Apply adjustment
+                        pos_pred = pos_pred + 0.1 * chemical_adjustment
+            
+            # Apply valence-based position modification
+            if 'valence_predictions' in model_outputs:
+                valence_preds = model_outputs['valence_predictions']
+                if valence_preds.size(0) == pos_pred.size(0):
+                    valence_input = torch.cat([valence_preds, pos_pred], dim=-1)
+                    valence_adjustment = self.valence_modifier(valence_input)
+                    pos_pred = pos_pred + 0.05 * valence_adjustment
+            
+            return pos_pred
+            
+        except Exception as e:
+            # Return original prediction if integration fails
+            return pos_pred
