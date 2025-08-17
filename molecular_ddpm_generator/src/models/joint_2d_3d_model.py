@@ -17,61 +17,116 @@ class Chemical2DBranch(nn.Module):
         super().__init__()
         self.hidden_dim = hidden_dim
         
-        # Chemical feature extractors
-        self.atom_type_embedding = nn.Embedding(11, 64)
-        self.bond_type_embedding = nn.Embedding(5, 32)
+        # Features: [atom_type, degree, formal_charge, is_aromatic, total_Hs, is_in_ring]
+        self.atom_feature_embedding = nn.Linear(6, hidden_dim)  # Use all 6 features directly
         
-        # 2D Graph convolutions for chemical patterns
+        # Features: [bond_type, is_conjugated, is_in_ring]
+        self.bond_feature_embedding = nn.Linear(3, 32)
+        
+        self.register_buffer('atom_type_mapping', torch.tensor([
+            6,   # 0: C  → atomic number 6
+            7,   # 1: N  → atomic number 7
+            8,   # 2: O  → atomic number 8
+            16,  # 3: S  → atomic number 16
+            9,   # 4: F  → atomic number 9
+            17,  # 5: Cl → atomic number 17
+            35,  # 6: Br → atomic number 35
+            53,  # 7: I  → atomic number 53
+            15,  # 8: P  → atomic number 15
+            1,   # 9: H  → atomic number 1 (if used)
+            6    # 10: UNK → default to Carbon (6)
+        ]))
+        
+        # Chemical graph convolutions with bond awareness
         self.chemical_convs = nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(hidden_dim, hidden_dim),
-                nn.SiLU(),
-                nn.LayerNorm(hidden_dim),
-                nn.Linear(hidden_dim, hidden_dim)
-            ) for _ in range(3)
+            ChemicalConvWithBonds(hidden_dim, 32) for _ in range(3)
         ])
         
-        # Chemical pattern recognition
-        self.pattern_detector = nn.Sequential(
+        # Chemical pattern analysis
+        self.chemical_analyzer = nn.Sequential(
             nn.Linear(hidden_dim, 128),
             nn.SiLU(),
             nn.Linear(128, 64)
         )
         
-        self.property_predictor = nn.Sequential(
-            nn.Linear(hidden_dim, 64),
-            nn.SiLU(),
-            nn.Linear(64, 32)
-        )
-        
     def forward(self, x, edge_index, edge_attr, batch):
         
-        # Extract atom types for embedding
-        atom_types = x[:, 0].long().clamp(0, 10)
-        atom_emb = self.atom_type_embedding(atom_types)
+        # x shape: [N, 6] - [atom_type, degree, formal_charge, is_aromatic, total_Hs, is_in_ring]
+        h_chem = self.atom_feature_embedding(x.float())
         
-        # Initial chemical features
-        h_chem = torch.cat([
-            atom_emb,
-            torch.zeros(atom_emb.size(0), self.hidden_dim - 64, device=atom_emb.device)
-        ], dim=-1)
+        atom_type_indices = x[:, 0].long().clamp(0, 10)  # Preprocessing indices [0-10]
+        atom_types_atomic = self.atom_type_mapping[atom_type_indices]  # → Atomic numbers for EGNN
         
-        # Chemical convolutions (focus on connectivity patterns)
+        # Use ALL 3 bond features from preprocessing if available
+        bond_features = None
+        if edge_attr is not None and edge_attr.size(1) >= 3:
+            # edge_attr shape: [E, 3] - [bond_type, is_conjugated, is_in_ring]
+            bond_features = self.bond_feature_embedding(edge_attr.float())
+        
+        # Chemical graph convolutions with bond awareness
         for conv in self.chemical_convs:
             h_prev = h_chem
-            h_chem = conv(h_chem)
-            h_chem = h_chem + h_prev  # Residual
+            h_chem = conv(h_chem, edge_index, bond_features)
+            h_chem = h_chem + h_prev  # Residual connection
         
-        # Chemical analysis
-        chemical_patterns = self.pattern_detector(h_chem)
-        molecular_properties = self.property_predictor(h_chem)
+        # Chemical pattern analysis
+        chemical_patterns = self.chemical_analyzer(h_chem)
+        
+        # Extract individual atom properties for interpretation
+        degrees = x[:, 1]            # Second feature is degree
+        formal_charges = x[:, 2]     # Third feature is formal_charge  
+        is_aromatic = x[:, 3]        # Fourth feature is aromatic
+        total_hs = x[:, 4]           # Fifth feature is total Hs
+        is_in_ring = x[:, 5]         # Sixth feature is in_ring
         
         return {
             'chemical_features': h_chem,
             'chemical_patterns': chemical_patterns,
-            'molecular_properties': molecular_properties,
-            'atom_types': atom_types
+            'atom_types': atom_types_atomic,      # Atomic numbers for EGNN constraints
+            'atom_type_indices': atom_type_indices,  # Original preprocessing indices
+            'degrees': degrees,
+            'formal_charges': formal_charges,
+            'is_aromatic': is_aromatic,
+            'total_hs': total_hs,
+            'is_in_ring': is_in_ring
         }
+
+class ChemicalConvWithBonds(nn.Module):
+    """Chemical graph convolution that uses bond features"""
+    
+    def __init__(self, hidden_dim, bond_dim):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.bond_dim = bond_dim
+        
+        # Message function with bond information
+        self.message_mlp = nn.Sequential(
+            nn.Linear(hidden_dim * 2 + bond_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim)
+        )
+        
+    def forward(self, h, edge_index, bond_features=None):
+        if edge_index.size(1) == 0:
+            return h
+        
+        row, col = edge_index
+        
+        # Messages with bond information
+        if bond_features is not None:
+            messages = torch.cat([h[row], h[col], bond_features], dim=-1)
+        else:
+            # Use zero bond features if not available
+            zero_bonds = torch.zeros(edge_index.size(1), self.bond_dim, device=h.device)
+            messages = torch.cat([h[row], h[col], zero_bonds], dim=-1)
+        
+        messages = self.message_mlp(messages)
+        
+        # Aggregate messages
+        h_out = torch.zeros_like(h)
+        h_out.index_add_(0, row, messages)
+        
+        return h_out
 
 class Physical3DBranch(nn.Module):    
     def __init__(self, hidden_dim=256, cutoff=10.0, num_layers=4):
@@ -86,7 +141,7 @@ class Physical3DBranch(nn.Module):
             cutoff=cutoff,
             sin_embedding=True,
             reflection_equiv=True,
-            enable_chemical_constraints=True  # 🎯 ALL constraints here
+            enable_chemical_constraints=True  # ALL constraints here
         )
         
         # Physics-based analyzers
@@ -139,7 +194,7 @@ class Physical3DBranch(nn.Module):
         }
 
 class SmartFusion(nn.Module):
-    """🔗 Smart 2D-3D Fusion without duplicate constraints"""
+    """Smart 2D-3D Fusion using full feature information"""
     
     def __init__(self, hidden_dim=256):
         super().__init__()
@@ -152,8 +207,8 @@ class SmartFusion(nn.Module):
         self.spatial_to_chem = nn.MultiheadAttention(
             hidden_dim, num_heads=8, batch_first=True
         )
-        
-        # Feature fusion
+    
+        # Feature fusion using all chemical patterns and geometric features
         self.feature_fusion = nn.Sequential(
             nn.Linear(hidden_dim * 2 + 64 + 64, hidden_dim),  # chem + spatial + patterns + geometric
             nn.SiLU(),
@@ -161,7 +216,7 @@ class SmartFusion(nn.Module):
             nn.Linear(hidden_dim, hidden_dim)
         )
         
-        # Complementarity scorer
+        # Complementarity scorer using rich features
         self.complementarity = nn.Sequential(
             nn.Linear(hidden_dim * 2, 64),
             nn.SiLU(),
@@ -170,12 +225,12 @@ class SmartFusion(nn.Module):
         )
         
     def forward(self, chemical_output, physical_output):
-        """Fuse 2D chemistry with 3D physics"""
+        """Fusion using all available chemical and spatial features"""
         
         h_chem = chemical_output['chemical_features']
         h_spatial = physical_output['spatial_features']
         
-        # Cross-attention (batch dimension for attention)
+        # Cross-attention
         h_chem_3d = h_chem.unsqueeze(0)
         h_spatial_3d = h_spatial.unsqueeze(0)
         
@@ -187,7 +242,7 @@ class SmartFusion(nn.Module):
         h_spatial_attended, _ = self.spatial_to_chem(h_spatial_3d, h_chem_3d, h_chem_3d)
         h_spatial_attended = h_spatial_attended.squeeze(0)
         
-        # Feature combination
+        # Feature combination using all patterns
         combined_features = torch.cat([
             h_chem_attended,
             h_spatial_attended,
@@ -197,7 +252,7 @@ class SmartFusion(nn.Module):
         
         fused_features = self.feature_fusion(combined_features)
         
-        # Measure complementarity
+        # Complementarity scoring
         complementarity_score = self.complementarity(
             torch.cat([h_chem, h_spatial], dim=-1)
         )
@@ -209,8 +264,8 @@ class SmartFusion(nn.Module):
             'total_constraint_loss': physical_output['total_constraint_loss']
         }
 
-class OptimizedJoint2D3DModel(MolecularModel):
-    """🎯 Optimized Joint 2D-3D Model: Clean separation + Smart fusion"""
+class Joint2D3DModel(MolecularModel):
+    """Joint 2D-3D Model utilizing ALL preprocessing features"""
     
     def __init__(self, atom_types=11, bond_types=4, hidden_dim=256,
                  pocket_dim=256, num_layers=4, max_radius=10.0,
@@ -220,28 +275,20 @@ class OptimizedJoint2D3DModel(MolecularModel):
         self.hidden_dim = hidden_dim
         self.conditioning_type = conditioning_type
         
-        print(f"🎯 Creating Optimized Joint2D3D Model:")
-        print(f"   - Clean 2D Chemistry Branch (no constraints)")
-        print(f"   - 3D Physics Branch with ALL constraints")
-        print(f"   - Smart fusion without duplication")
-        
-        # Input embedding
-        self.atom_embedding = nn.Linear(6, hidden_dim)
-        
-        # 🧪 2D Chemistry Branch (pure chemical patterns)
+        # 2D Chemistry Branch using full preprocessing features
         self.chemistry_2d = Chemical2DBranch(hidden_dim)
         
-        # ⚛️ 3D Physics Branch (SE(3) + ALL constraints)
+        # 3D Physics Branch (uses 3D positions from preprocessing)
         self.physics_3d = Physical3DBranch(
             hidden_dim=hidden_dim,
             cutoff=max_radius,
             num_layers=num_layers
         )
         
-        # 🔗 Smart Fusion
+        # Smart Fusion
         self.fusion = SmartFusion(hidden_dim)
         
-        # Pocket conditioning
+        # Pocket conditioning (uses 7 residue features from preprocessing)
         if IMPROVED_POCKET_AVAILABLE:
             self.pocket_encoder = create_improved_pocket_encoder(
                 hidden_dim=hidden_dim,
@@ -249,7 +296,7 @@ class OptimizedJoint2D3DModel(MolecularModel):
             )
         else:
             self.pocket_encoder = SimplePocketEncoder(
-                input_dim=7,
+                input_dim=7,  # 7 residue features from preprocessing
                 hidden_dim=hidden_dim,
                 output_dim=pocket_dim
             )
@@ -270,22 +317,22 @@ class OptimizedJoint2D3DModel(MolecularModel):
                 pocket_x=None, pocket_pos=None, pocket_edge_index=None,
                 pocket_batch=None, **kwargs):
         
-        # Initial embedding
-        h_init = self._embed_atoms_flexible(x)
-        
-        # 🧪 2D Chemistry Processing (pure chemical patterns)
+        # 🧪 2D Chemistry Processing using ALL atom and bond features
         chemistry_output = self.chemistry_2d(x, edge_index, edge_attr, batch)
         
-        # ⚛️ 3D Physics Processing (SE(3) + constraints)
+        # Convert to hidden representation for 3D processing
+        h_init = chemistry_output['chemical_features']
+        
+        # 3D Physics Processing using 3D positions
         physics_output = self.physics_3d(
             h_init, pos, batch, edge_index, edge_attr,
             atom_types=chemistry_output['atom_types']
         )
         
-        # 🔗 Smart Fusion
+        # Smart Fusion
         fusion_output = self.fusion(chemistry_output, physics_output)
         
-        # Pocket conditioning
+        # Pocket conditioning using ALL 7 residue features
         pocket_condition = self._encode_pocket(
             pocket_x, pocket_pos, pocket_edge_index, pocket_batch, batch
         )
@@ -312,11 +359,16 @@ class OptimizedJoint2D3DModel(MolecularModel):
             'bond_pred': bond_pred,
             'node_features': h_final,
             
-            # Chemistry branch outputs
+            # Full chemistry outputs from ALL preprocessing features
             'chemical_patterns': chemistry_output['chemical_patterns'],
-            'molecular_properties': chemistry_output['molecular_properties'],
+            'atom_types': chemistry_output['atom_types'],
+            'degrees': chemistry_output['degrees'],
+            'formal_charges': chemistry_output['formal_charges'],
+            'is_aromatic': chemistry_output['is_aromatic'],
+            'total_hs': chemistry_output['total_hs'],
+            'is_in_ring': chemistry_output['is_in_ring'],
             
-            # Physics branch outputs (with constraints)
+            # Physics outputs
             'geometric_features': physics_output['geometric_features'],
             'invariant_features': physics_output['invariant_features'],
             
@@ -328,34 +380,21 @@ class OptimizedJoint2D3DModel(MolecularModel):
             'total_constraint_loss': fusion_output['total_constraint_loss']
         }
     
-    def _embed_atoms_flexible(self, x):
-        """Flexible atom embedding"""
-        if x.dim() != 2:
-            raise ValueError(f"Expected 2D input, got {x.dim()}D")
-        
-        input_dim = x.size(1)
-        if input_dim < 6:
-            padding = torch.zeros(x.size(0), 6 - input_dim, device=x.device, dtype=x.dtype)
-            x_padded = torch.cat([x, padding], dim=1)
-            return self.atom_embedding(x_padded.float())
-        elif input_dim > 6:
-            x_truncated = x[:, :6]
-            return self.atom_embedding(x_truncated.float())
-        else:
-            return self.atom_embedding(x.float())
-    
     def _encode_pocket(self, pocket_x, pocket_pos, pocket_edge_index, 
                       pocket_batch, ligand_batch):
-        """Encode protein pocket"""
+        """Encode protein pocket using ALL 7 residue features"""
         if pocket_x is None or pocket_pos is None:
             return None
         
         try:
+            # pocket_x shape should be [M, 7] from preprocessing
+            # Features: [res_type, res_id, hydrophobic, charged, polar, aromatic, bfactor]
             pocket_repr = self.pocket_encoder(
                 pocket_x, pocket_pos, pocket_edge_index, pocket_batch
             )
             return pocket_repr
-        except Exception:
+        except Exception as e:
+            print(f"Warning: Pocket encoding failed: {e}")
             batch_size = ligand_batch.max().item() + 1
             return torch.zeros(batch_size, self.hidden_dim, device=ligand_batch.device)
     
@@ -380,9 +419,9 @@ class OptimizedJoint2D3DModel(MolecularModel):
         return atom_features + broadcasted_condition
 
 # Factory function
-def create_optimized_joint2d3d_model(hidden_dim=256, num_layers=4, conditioning_type="add", **kwargs):
-    """Create optimized joint2d3d model with clean separation"""
-    return OptimizedJoint2D3DModel(
+def joint2d3d_model(hidden_dim=256, num_layers=4, conditioning_type="add", **kwargs):
+    """Create joint2d3d model using ALL preprocessing features"""
+    return Joint2D3DModel(
         atom_types=11,
         bond_types=4,
         hidden_dim=hidden_dim,

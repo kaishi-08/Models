@@ -10,27 +10,13 @@ class MolecularDDPM(nn.Module):
                  num_timesteps: int = 1000,
                  beta_schedule: str = "cosine",
                  beta_start: float = 0.0001,
-                 beta_end: float = 0.02,
-                 chemical_weight: float = 0.1,
-                 valence_weight: float = 0.05):
+                 beta_end: float = 0.02
+                 ):
         super().__init__()
         
         self.num_timesteps = num_timesteps
-        self.chemical_weight = chemical_weight
-        self.valence_weight = valence_weight
-        
-        self.valence_rules = {0: 4,
-                              1: 3, 
-                              2: 2, 
-                              3: 6, 
-                              4: 1, 
-                              5: 1, 
-                              6: 1, 
-                              7: 1, 
-                              8: 4, 
-                              9: 4, 
-                              10: 4}
-        
+
+
         if beta_schedule == "cosine":
             self.betas = self._cosine_beta_schedule(num_timesteps)
         elif beta_schedule == "linear":
@@ -277,18 +263,15 @@ class MolecularDDPMModel(nn.Module):
         return emb
     
     def to(self, device):
-        """Move model to device"""
         self.base_model = self.base_model.to(device)
         self.time_embedding = self.time_embedding.to(device)
         super().to(device)
         return self
     
     def state_dict(self, *args, **kwargs):
-        """Get state dictionary including all components"""
         return super().state_dict(*args, **kwargs)
     
     def load_state_dict(self, state_dict, strict=True):
-        """Load state dictionary"""
         try:
             super().load_state_dict(state_dict, strict=strict)
         except Exception as e:
