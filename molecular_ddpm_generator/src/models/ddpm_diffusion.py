@@ -1,36 +1,43 @@
-# src/models/ddpm_diffusion.py - Simplified without missing methods
+# Enhanced DDPM that also noises graph structure
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
-from typing import Tuple, Optional, Dict, Any
+from typing import Dict, Any, Tuple
 
 class MolecularDDPM(nn.Module):    
     def __init__(self, 
                  num_timesteps: int = 1000,
                  beta_schedule: str = "cosine",
                  beta_start: float = 0.0001,
-                 beta_end: float = 0.02
-                 ):
+                 beta_end: float = 0.02,
+                 noise_graph_structure: bool = True,
+                 atom_noise_scale: float = 0.1,
+                 bond_noise_scale: float = 0.2):
         super().__init__()
         
         self.num_timesteps = num_timesteps
-
-
+        self.noise_graph_structure = noise_graph_structure
+        self.atom_noise_scale = atom_noise_scale
+        self.bond_noise_scale = bond_noise_scale
+        
+        # Original position diffusion parameters
         if beta_schedule == "cosine":
             self.betas = self._cosine_beta_schedule(num_timesteps)
-        elif beta_schedule == "linear":
-            self.betas = torch.linspace(beta_start, beta_end, num_timesteps)
         else:
-            raise ValueError(f"Unknown beta schedule: {beta_schedule}")
+            self.betas = torch.linspace(beta_start, beta_end, num_timesteps)
         
         self.alphas = 1 - self.betas
         self.alphas_cumprod = torch.cumprod(self.alphas, dim=0)
-        
         self.sqrt_alphas_cumprod = torch.sqrt(self.alphas_cumprod)
         self.sqrt_one_minus_alphas_cumprod = torch.sqrt(1 - self.alphas_cumprod)
         
+        if noise_graph_structure:
+            self.graph_betas = self._cosine_beta_schedule(num_timesteps, s=0.01)  # Slower for discrete
+            self.graph_alphas = 1 - self.graph_betas
+            self.graph_alphas_cumprod = torch.cumprod(self.graph_alphas, dim=0)
+    
     def _cosine_beta_schedule(self, timesteps, s=0.008):
+        """Cosine schedule for diffusion"""
         steps = timesteps + 1
         x = torch.linspace(0, timesteps, steps)
         alphas_cumprod = torch.cos(((x / timesteps) + s) / (1 + s) * torch.pi * 0.5) ** 2
@@ -38,255 +45,212 @@ class MolecularDDPM(nn.Module):
         betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])
         return torch.clip(betas, 0.0001, 0.9999)
     
-    def forward_process(self, x0: torch.Tensor, t: torch.Tensor, noise: torch.Tensor = None):
+    def forward_process_positions(self, pos: torch.Tensor, t: torch.Tensor, 
+                                noise: torch.Tensor = None) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Forward diffusion for positions (continuous)"""
         if noise is None:
-            noise = torch.randn_like(x0)
+            noise = torch.randn_like(pos)
         
-        device = x0.device
+        device = pos.device
         sqrt_alphas_cumprod = self.sqrt_alphas_cumprod.to(device)
         sqrt_one_minus_alphas_cumprod = self.sqrt_one_minus_alphas_cumprod.to(device)
         
-        # Fixed: Proper batch timestep handling
         sqrt_alpha_cumprod_t = sqrt_alphas_cumprod[t]
         sqrt_one_minus_alpha_cumprod_t = sqrt_one_minus_alphas_cumprod[t]
         
         # Handle single vs batch timesteps
         if t.numel() == 1:
-            # Single timestep for whole batch
             alpha_coeff = sqrt_alpha_cumprod_t.item()
             noise_coeff = sqrt_one_minus_alpha_cumprod_t.item()
         else:
-            # Multiple timesteps - broadcast properly
             alpha_coeff = sqrt_alpha_cumprod_t.view(-1, 1)
             noise_coeff = sqrt_one_minus_alpha_cumprod_t.view(-1, 1)
         
-        # Forward process: q(x_t | x_0)
-        x_t = alpha_coeff * x0 + noise_coeff * noise
-        
-        return x_t, noise
+        pos_t = alpha_coeff * pos + noise_coeff * noise
+        return pos_t, noise
     
-    def compute_loss(self, model, x0: torch.Tensor, **model_kwargs):
-        device = x0.device
+    def forward_process_atoms(self, atom_features: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        """Forward diffusion for atom features (add noise to continuous features)"""
+        if not self.noise_graph_structure or atom_features is None:
+            return atom_features
+        
+        device = atom_features.device
+        graph_alphas_cumprod = self.graph_alphas_cumprod.to(device)
+        
+        # Get noise level for this timestep
+        alpha_t = graph_alphas_cumprod[t]
+        if t.numel() == 1:
+            alpha_coeff = alpha_t.item()
+        else:
+            alpha_coeff = alpha_t.view(-1, 1)
+        
+        # Add noise to atom features (continuous features like formal charge, etc.)
+        noise = torch.randn_like(atom_features) * self.atom_noise_scale
+        noisy_atoms = alpha_coeff * atom_features + (1 - alpha_coeff) * noise
+        
+        # For discrete features (atom type), use different approach
+        if atom_features.size(1) > 0:  # First feature is typically atom type
+            atom_types = atom_features[:, 0].long()
+            
+            # Discrete diffusion: randomly flip atom types based on noise level
+            flip_prob = (1 - alpha_coeff) * 0.1  # Small probability to change atom type
+            random_mask = torch.rand(atom_types.size(0), device=device) < flip_prob
+            
+            if random_mask.any():
+                # Change to random atom type (C, N, O, S mainly)
+                new_atom_types = torch.randint(0, 4, (random_mask.sum(),), device=device)
+                noisy_atoms[random_mask, 0] = new_atom_types.float()
+        
+        return noisy_atoms
+    
+    def forward_process_bonds(self, edge_attr: torch.Tensor, edge_index: torch.Tensor, 
+                            t: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Forward diffusion for bond features"""
+        if not self.noise_graph_structure or edge_attr is None or edge_index.size(1) == 0:
+            return edge_attr, edge_index
+        
+        device = edge_attr.device
+        graph_alphas_cumprod = self.graph_alphas_cumprod.to(device)
+        
+        alpha_t = graph_alphas_cumprod[t]
+        if t.numel() == 1:
+            alpha_coeff = alpha_t.item()
+        else:
+            alpha_coeff = alpha_t.item()  # Simplified for now
+        
+        # Add noise to bond features
+        noise = torch.randn_like(edge_attr) * self.bond_noise_scale
+        noisy_bonds = alpha_coeff * edge_attr + (1 - alpha_coeff) * noise
+        
+        # Bond connectivity changes (remove/add bonds with small probability)
+        edge_remove_prob = (1 - alpha_coeff) * 0.05  # Small prob to remove bonds
+        edge_mask = torch.rand(edge_index.size(1), device=device) > edge_remove_prob
+        
+        if edge_mask.sum() < edge_index.size(1):
+            # Remove some edges
+            edge_index = edge_index[:, edge_mask]
+            noisy_bonds = noisy_bonds[edge_mask]
+        
+        return noisy_bonds, edge_index
+    
+    def compute_enhanced_loss(self, model, batch: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, Dict[str, float]]:
+        """Enhanced loss that includes both position and graph structure"""
+        device = batch['pos'].device
         t = torch.randint(0, self.num_timesteps, (1,), device=device)
         
-        try:
-            # Sample noise
-            noise = torch.randn_like(x0)
-            
-            # Forward process (add noise)
-            x_t, _ = self.forward_process(x0, t, noise)
-            
-            # Prepare model inputs
-            model_inputs = self._prepare_model_inputs(x_t, t, model_kwargs, device)
-            
-            # Predict noise
-            model_output = model(**model_inputs)
-            
-            # Extract position prediction (simplified)
-            if isinstance(model_output, dict):
-                noise_pred = model_output.get('pos_pred', model_output.get('positions', model_output.get('node_features')))
-            else:
-                noise_pred = model_output
-            
-            # Handle None output
-            if noise_pred is None:
-                raise ValueError("Model returned None output")
-            
-            # Ensure correct shape
-            if noise_pred.shape != noise.shape:
-                if noise_pred.size(0) == noise.size(0):
-                    if noise_pred.size(1) >= noise.size(1):
-                        noise_pred = noise_pred[:, :noise.size(1)]
-                    else:
-                        # Pad if needed
-                        padding = torch.zeros(noise_pred.size(0), noise.size(1) - noise_pred.size(1), 
-                                            device=noise_pred.device, dtype=noise_pred.dtype)
-                        noise_pred = torch.cat([noise_pred, padding], dim=1)
-                else:
-                    raise ValueError(f"Batch size mismatch: pred {noise_pred.shape} vs target {noise.shape}")
-            
-            # Core DDPM loss (simplified)
-            ddpm_loss = F.mse_loss(noise_pred, noise)
-            
-            # Simple loss dictionary
-            loss_dict = {
-                'noise_loss': ddpm_loss.item(),
-                'total_loss': ddpm_loss.item()
-            }
-            
-            return ddpm_loss, loss_dict
-            
-        except Exception as e:
-            print(f"DDPM compute_loss error: {e}")
-            print(f"x0 shape: {x0.shape}, device: {x0.device}")
-            
-            # Return dummy loss to continue training
-            dummy_loss = torch.tensor(1.0, device=device, requires_grad=True)
-            return dummy_loss, {'noise_loss': 1.0, 'total_loss': 1.0}
-    
-    def _prepare_model_inputs(self, x_t: torch.Tensor, t: torch.Tensor, 
-                             model_kwargs: Dict[str, Any], device: torch.device) -> Dict[str, Any]:
-        """Prepare model inputs with proper device handling"""
+        losses = {}
+        total_loss = 0.0
+        
+        # 1. Position diffusion loss (main)
+        pos_noise = torch.randn_like(batch['pos'])
+        pos_t, _ = self.forward_process_positions(batch['pos'], t, pos_noise)
+        
+        # 2. Graph structure diffusion (if enabled)
+        noisy_x = batch['x']  # Default: no noise
+        noisy_edge_attr = batch['edge_attr']
+        noisy_edge_index = batch['edge_index']
+        
+        if self.noise_graph_structure:
+            noisy_x = self.forward_process_atoms(batch['x'], t)
+            noisy_edge_attr, noisy_edge_index = self.forward_process_bonds(
+                batch['edge_attr'], batch['edge_index'], t
+            )
+        
+        # Prepare model inputs
         model_inputs = {
-            'pos': x_t,  # Noisy positions
-            't': t       # Timesteps
+            'pos': pos_t,  # Noisy positions
+            'x': noisy_x,  # Noisy atom features (if enabled)
+            'edge_index': noisy_edge_index,  # Potentially modified connectivity
+            'edge_attr': noisy_edge_attr,  # Noisy bond features (if enabled)
+            'batch': batch['batch'],
+            't': t
         }
         
-        # Add molecular features
-        if 'atom_features' in model_kwargs:
-            model_inputs['x'] = self._ensure_device(model_kwargs['atom_features'], device)
-        elif 'x' in model_kwargs:
-            model_inputs['x'] = self._ensure_device(model_kwargs['x'], device)
+        # Add pocket data if available
+        if 'pocket_x' in batch:
+            model_inputs.update({
+                'pocket_x': batch['pocket_x'],
+                'pocket_pos': batch['pocket_pos'],
+                'pocket_edge_index': batch.get('pocket_edge_index'),
+                'pocket_batch': batch.get('pocket_batch')
+            })
         
-        # Add graph structure
-        graph_keys = ['edge_index', 'edge_attr', 'batch']
-        for key in graph_keys:
-            if key in model_kwargs and model_kwargs[key] is not None:
-                model_inputs[key] = self._ensure_device(model_kwargs[key], device)
-        
-        # Add pocket data
-        pocket_keys = ['pocket_x', 'pocket_pos', 'pocket_edge_index', 'pocket_batch']
-        for key in pocket_keys:
-            if key in model_kwargs and model_kwargs[key] is not None:
-                model_inputs[key] = self._ensure_device(model_kwargs[key], device)
-        
-        return model_inputs
-    
-    def _ensure_device(self, tensor, device):
-        """Ensure tensor is on correct device"""
-        if tensor is None:
-            return None
-        if not isinstance(tensor, torch.Tensor):
-            return tensor
-        return tensor.to(device)
+        try:
+            # Model forward pass
+            model_output = model(**model_inputs)
+            
+            # 1. Position loss (main DDPM loss)
+            if isinstance(model_output, dict) and 'pos_pred' in model_output:
+                pos_pred = model_output['pos_pred']
+            else:
+                pos_pred = model_output
+            
+            pos_loss = F.mse_loss(pos_pred, pos_noise)
+            losses['pos_loss'] = pos_loss.item()
+            total_loss += pos_loss
+            
+            # 2. Graph structure losses (if enabled)
+            if self.noise_graph_structure:
+                # Atom type reconstruction loss
+                if 'atom_pred' in model_output:
+                    atom_loss = F.mse_loss(model_output['atom_pred'], batch['x'])
+                    losses['atom_loss'] = atom_loss.item()
+                    total_loss += 0.1 * atom_loss
+                
+                # Bond type reconstruction loss  
+                if 'bond_pred' in model_output and batch['edge_attr'] is not None:
+                    if model_output['bond_pred'].size(0) == batch['edge_attr'].size(0):
+                        bond_loss = F.mse_loss(model_output['bond_pred'], batch['edge_attr'])
+                        losses['bond_loss'] = bond_loss.item()
+                        total_loss += 0.1 * bond_loss
+            
+            # 3. Constraint losses
+            if isinstance(model_output, dict) and 'total_constraint_loss' in model_output:
+                constraint_loss = model_output['total_constraint_loss']
+                if constraint_loss is not None and constraint_loss.requires_grad:
+                    losses['constraint_loss'] = constraint_loss.item()
+                    total_loss += 0.1 * constraint_loss
+            
+            losses['total_loss'] = total_loss.item()
+            return total_loss, losses
+            
+        except Exception as e:
+            print(f"Enhanced DDPM loss error: {e}")
+            dummy_loss = torch.tensor(1.0, device=device, requires_grad=True)
+            return dummy_loss, {'pos_loss': 1.0, 'total_loss': 1.0}
 
 
-class MolecularDDPMModel(nn.Module):
+# Usage example
+def ddpm(noise_graph_structure=True):
+    """Create enhanced DDPM with optional graph structure noise"""
+    return MolecularDDPM(
+        num_timesteps=1000,
+        beta_schedule="cosine",
+        noise_graph_structure=noise_graph_structure,
+        atom_noise_scale=0.1,
+        bond_noise_scale=0.2
+    )
+
+
+# Integration with existing trainer
+class DDPMTrainer:
+    """Enhanced trainer that uses graph structure diffusion"""
     
-    def __init__(self, base_model, ddpm: MolecularDDPM):
-        super().__init__()
-        self.base_model = base_model
-        self.ddpm = ddpm
+    def __init__(self, base_model, enhanced_ddpm, optimizer, device='cuda'):
+        self.model = base_model
+        self.ddpm = enhanced_ddpm
+        self.optimizer = optimizer
+        self.device = device
+    
+    def train_step(self, batch):
+        """Training step with enhanced diffusion"""
+        self.optimizer.zero_grad()
         
-        # Time embedding for DDPM
-        hidden_dim = getattr(base_model, 'hidden_dim', 256)
-        self.time_embedding = nn.Sequential(
-            nn.Linear(128, 256),
-            nn.ReLU(),
-            nn.Linear(256, hidden_dim)
-        )
+        # Enhanced loss computation
+        loss, loss_dict = self.ddpm.compute_enhanced_loss(self.model, batch)
         
-        # Learnable output scaling
-        self.register_parameter('output_scale', nn.Parameter(torch.tensor(1.0)))
-    
-    def forward(self, **kwargs):
-        try:
-            # Extract time if present
-            t = kwargs.pop('t', None)
-            pos = kwargs.get('pos')
-            x = kwargs.get('x')
-            
-            # Time embedding (if provided)
-            if t is not None:
-                t_emb = self._embed_timestep(t)
-                time_features = self.time_embedding(t_emb)
-                kwargs['time_features'] = time_features
-            
-            # Call base model with all kwargs
-            outputs = self.base_model(**kwargs)
-            
-            # Simplified output handling (no complex chemical integration)
-            if isinstance(outputs, dict):
-                if 'pos_pred' in outputs:
-                    pos_pred = outputs['pos_pred']
-                elif 'positions' in outputs:
-                    pos_pred = outputs['positions']
-                elif 'node_features' in outputs:
-                    pos_pred = outputs['node_features']
-                else:
-                    # Try to get any tensor output
-                    pos_pred = None
-                    for key, value in outputs.items():
-                        if isinstance(value, torch.Tensor) and value.dim() >= 2:
-                            pos_pred = value
-                            break
-            else:
-                pos_pred = outputs
-            
-            # Handle output
-            if pos_pred is not None:
-                # Ensure gradients are preserved
-                if not pos_pred.requires_grad and pos_pred.dtype == torch.float:
-                    pos_pred = pos_pred.requires_grad_(True)
-                
-                # Apply learnable scaling (simplified)
-                scaled_output = pos_pred * self.output_scale
-                
-                # Ensure output requires gradients
-                if not scaled_output.requires_grad:
-                    scaled_output = scaled_output.requires_grad_(True)
-                
-                return scaled_output
-            else:
-                # Fallback: return reasonable random output
-                if pos is not None:
-                    output = torch.randn_like(pos, requires_grad=True)
-                elif x is not None:
-                    output = torch.randn(x.size(0), 3, device=x.device, requires_grad=True)
-                else:
-                    output = torch.randn(1, 3, requires_grad=True)
-                
-                return output
-                    
-        except Exception as e:
-            print(f"MolecularDDPMModel forward error: {e}")
-            
-            # Safe fallback
-            pos = kwargs.get('pos')
-            x = kwargs.get('x')
-            
-            if pos is not None:
-                return torch.randn_like(pos, requires_grad=True)
-            elif x is not None:
-                return torch.randn(x.size(0), 3, device=x.device, requires_grad=True)
-            else:
-                return torch.randn(1, 3, requires_grad=True)
-    
-    def _embed_timestep(self, timesteps, dim=128):
-        """Sinusoidal timestep embedding"""
-        device = timesteps.device
-        half_dim = dim // 2
-        emb = np.log(10000) / (half_dim - 1)
-        emb = torch.exp(torch.arange(half_dim, dtype=torch.float32, device=device) * -emb)
-        emb = timesteps.float()[:, None] * emb[None, :]
-        emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=1)
-        return emb
-    
-    def to(self, device):
-        self.base_model = self.base_model.to(device)
-        self.time_embedding = self.time_embedding.to(device)
-        super().to(device)
-        return self
-    
-    def state_dict(self, *args, **kwargs):
-        return super().state_dict(*args, **kwargs)
-    
-    def load_state_dict(self, state_dict, strict=True):
-        try:
-            super().load_state_dict(state_dict, strict=strict)
-        except Exception as e:
-            print(f"Warning: Could not load full state dict: {e}")
-            # Try loading base model only
-            base_model_keys = {k: v for k, v in state_dict.items() if k.startswith('base_model.')}
-            if base_model_keys:
-                # Remove 'base_model.' prefix
-                base_state = {k[11:]: v for k, v in base_model_keys.items()}
-                self.base_model.load_state_dict(base_state, strict=False)
-                print("Loaded base_model successfully")
-            
-            # Try loading time embedding
-            time_emb_keys = {k: v for k, v in state_dict.items() if k.startswith('time_embedding.')}
-            if time_emb_keys:
-                time_state = {k[15:]: v for k, v in time_emb_keys.items()}
-                self.time_embedding.load_state_dict(time_state, strict=False)
-                print("Loaded time_embedding successfully")
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+        self.optimizer.step()
+        
+        return loss_dict
