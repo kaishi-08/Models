@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from torch_geometric.nn import global_mean_pool, global_max_pool, radius_graph
 from torch_geometric.utils import to_dense_batch
 from .base_model import MolecularModel
-from .egnn import CorrectedEGNNBackbone, create_corrected_egnn_backbone  
+from .egnn import EGNNBackbone, egnn_backbone  
 from utils.molecular_utils import BondConstraintLayer, ValenceConstraintLayer, ChemicalConstraintGNN
 
 try:
@@ -195,7 +195,7 @@ class PhysicalSpecialist3D(nn.Module):
         self.cutoff = cutoff
         
         # CORRECTED: Use proper EGNN implementation
-        self.egnn_backbone = create_corrected_egnn_backbone(
+        self.egnn_backbone = egnn_backbone(
             hidden_dim=hidden_dim, 
             num_layers=num_layers, 
             cutoff=cutoff,
