@@ -231,26 +231,21 @@ def ddpm(noise_graph_structure=True):
         bond_noise_scale=0.2
     )
 
-
-# Integration with existing trainer
-class DDPMTrainer:
-    """Enhanced trainer that uses graph structure diffusion"""
-    
-    def __init__(self, base_model, enhanced_ddpm, optimizer, device='cuda'):
-        self.model = base_model
-        self.ddpm = enhanced_ddpm
+class DDPM_trainer:
+    def __init__(self, base_model, enchanced_ddpm, optimizer, device = "cuda" ):
+        self.base_model = base_model
+        self.enchanced_ddpm = enchanced_ddpm
         self.optimizer = optimizer
+
         self.device = device
-    
+
     def train_step(self, batch):
-        """Training step with enhanced diffusion"""
         self.optimizer.zero_grad()
-        
-        # Enhanced loss computation
+
         loss, loss_dict = self.ddpm.compute_enhanced_loss(self.model, batch)
-        
+
         loss.backward()
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
         self.optimizer.step()
-        
+
         return loss_dict
