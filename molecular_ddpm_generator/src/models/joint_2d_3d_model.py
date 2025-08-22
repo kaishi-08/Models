@@ -418,9 +418,8 @@ class Joint2D3DModel(MolecularModel):
         
         return atom_features + broadcasted_condition
 
-# Factory function
-def joint2d3d_model(hidden_dim=256, num_layers=4, conditioning_type="add", **kwargs):
-    """Create joint2d3d model using ALL preprocessing features"""
+def create_joint2d3d_model(hidden_dim=256, num_layers=4, conditioning_type="add", **kwargs):
+    """🎯 FIXED: Create joint2d3d model using ALL preprocessing features"""
     return Joint2D3DModel(
         atom_types=11,
         bond_types=4,
@@ -430,3 +429,6 @@ def joint2d3d_model(hidden_dim=256, num_layers=4, conditioning_type="add", **kwa
         conditioning_type=conditioning_type,
         **kwargs
     )
+
+# Backward compatibility alias
+joint2d3d_model = create_joint2d3d_model

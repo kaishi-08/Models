@@ -519,7 +519,7 @@ def create_improved_pocket_encoder(hidden_dim: int = 256, output_dim: int = 256,
     )
 
 
-# 🎯 Simple pocket encoder for basic usage (backward compatibility)
+# Simple pocket encoder for basic usage (backward compatibility)
 class SimplePocketEncoder(nn.Module):
     """Simple pocket encoder fallback"""
     

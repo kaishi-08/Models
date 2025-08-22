@@ -1,4 +1,4 @@
-# scripts/train_ddpm.py - FIXED import error
+# scripts/train_ddpm.py - FIXED imports and training logic
 import os
 import sys
 import yaml
@@ -14,18 +14,22 @@ project_root = Path(__file__).parent.parent.absolute()
 sys.path.insert(0, str(project_root))
 sys.path.insert(0, str(project_root / "src"))
 
-print(f"Project root: {project_root}")
+print(f"🎯 Project root: {project_root}")
+print(f"🎯 Python path: {sys.path[:3]}")
 
 try:
-    from src.models.joint_2d_3d_model import Joint2D3DModel, create_joint2d3d_model  # FIXED
+    from src.models.joint_2d_3d_model import create_joint2d3d_model  # ✅ FIXED
     from src.models.ddpm_diffusion import MolecularDDPM, MolecularDDPMModel
     from src.data.data_loaders import CrossDockDataLoader
     from src.training.ddpm_trainer import DDPMMolecularTrainer
     from src.training.callbacks_fixed import WandBLogger, EarlyStopping, ModelCheckpoint
-    from src.utils.molecular_utils import MolecularMetrics
+    print("✅ All imports successful!")
 except ImportError as e:
-    print(f"Import error: {e}")
-    print("Make sure to install: pip install torch-geometric>=2.2.0")
+    print(f"❌ Import error: {e}")
+    print("Please install missing dependencies:")
+    print("   pip install torch-geometric>=2.2.0")
+    print("   pip install rdkit-pypi")
+    print("   pip install biopython")
     sys.exit(1)
 
 warnings.filterwarnings('ignore')
@@ -57,7 +61,7 @@ def safe_bool(value: Any, default: bool = False) -> bool:
 
 def validate_config(config: Dict[str, Any]) -> Dict[str, Any]:
     """Validate and fix config types"""
-    print("Validating configuration...")
+    print("🔧 Validating configuration...")
     
     # Fix optimizer config
     if 'optimizer' in config:
@@ -110,15 +114,17 @@ def validate_config(config: Dict[str, Any]) -> Dict[str, Any]:
         ddpm_config['beta_start'] = safe_float(ddpm_config.get('beta_start', 0.0001))
         ddpm_config['beta_end'] = safe_float(ddpm_config.get('beta_end', 0.02))
     
-    print("Configuration validated")
+    print("✅ Configuration validated")
     return config
 
 def setup_device():
     if torch.cuda.is_available():
         device = torch.device('cuda')
+        print(f"🚀 Using GPU: {torch.cuda.get_device_name(0)}")
+        print(f"   GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
     else:
         device = torch.device('cpu')
-        print("Using CPU")
+        print("💻 Using CPU (GPU not available)")
     
     return device
 
@@ -129,22 +135,22 @@ def check_data_files(config):
         config['data']['val_path']
     ]
     
-    print("Checking data files...")
+    print("📁 Checking data files...")
     for file_path in required_files:
         full_path = project_root / file_path
         if not full_path.exists():
-            print(f"Missing: {full_path}")
-            print("\nRun preprocessing first:")
+            print(f"❌ Missing: {full_path}")
+            print("\n🔧 Run preprocessing first:")
             print("   python scripts/preprocess_crossdock_data.py")
             return False
         else:
             size_mb = full_path.stat().st_size / (1024 * 1024)
-            print(f"Found: {file_path} ({size_mb:.1f} MB)")
+            print(f"✅ Found: {file_path} ({size_mb:.1f} MB)")
     
     return True
 
 def create_model(config, device):
-    print("Creating EGNN DDPM model...")
+    print("🧠 Creating DDPM model...")
     
     try:
         # 🎯 FIXED: Use correct function name and parameters
@@ -169,21 +175,21 @@ def create_model(config, device):
         total_params = sum(p.numel() for p in model.parameters())
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         
-        print(f"   Total parameters: {total_params:,}")
-        print(f"   Trainable parameters: {trainable_params:,}")
-        print(f"   Model size: {total_params * 4 / 1e6:.1f} MB")
+        print(f"   📊 Total parameters: {total_params:,}")
+        print(f"   🎯 Trainable parameters: {trainable_params:,}")
+        print(f"   💾 Model size: {total_params * 4 / 1e6:.1f} MB")
         
         return model, ddpm
         
     except Exception as e:
-        print(f"Error creating EGNN model: {e}")
+        print(f"❌ Error creating model: {e}")
         import traceback
         traceback.print_exc()
         return None, None
 
 def create_data_loaders(config):
     """Create train and validation data loaders"""
-    print("Creating data loaders...")
+    print("📊 Creating data loaders...")
     
     try:
         # Create loaders with validated config
@@ -191,29 +197,31 @@ def create_data_loaders(config):
         val_loader = CrossDockDataLoader.create_val_loader(config)
         
         # Test loading a batch
-        print("Testing data loading...")
+        print("🧪 Testing data loading...")
         try:
             test_batch = next(iter(train_loader))
             if test_batch is not None:
-                print(f"   Sample batch: {test_batch.x.shape[0]} atoms, {test_batch.edge_index.shape[1]} bonds")
+                print(f"   ✅ Sample batch: {test_batch.x.shape[0]} atoms, {test_batch.edge_index.shape[1]} bonds")
                 if hasattr(test_batch, 'pocket_x') and test_batch.pocket_x is not None:
-                    print(f"   Pocket data: {test_batch.pocket_x.shape[0]} pocket atoms")
+                    print(f"   🧬 Pocket data: {test_batch.pocket_x.shape[0]} pocket atoms")
                 else:
-                    print(f"   No pocket data in batch")
+                    print(f"   ⚠️  No pocket data in batch")
             else:
-                print("   First batch is None")
+                print("   ⚠️  First batch is None")
         except Exception as e:
-            print(f"   Error testing batch: {e}")
+            print(f"   ❌ Error testing batch: {e}")
         
         return train_loader, val_loader
         
     except Exception as e:
-        print(f"Error creating data loaders: {e}")
+        print(f"❌ Error creating data loaders: {e}")
         import traceback
         traceback.print_exc()
         return None, None
 
 def create_trainer(model, ddpm, config, device):
+    print("🏃 Creating trainer...")
+    
     try:
         # Create optimizer with validated parameters
         opt_config = config['optimizer']
@@ -234,7 +242,7 @@ def create_trainer(model, ddpm, config, device):
                 eps=opt_config['eps']
             )
         
-        print("   Optimizer created successfully")
+        print("   ✅ Optimizer created")
         
         # Create scheduler
         scheduler = None
@@ -246,7 +254,7 @@ def create_trainer(model, ddpm, config, device):
                     T_max=safe_int(sched_config['T_max'], 100),
                     eta_min=safe_float(sched_config['eta_min'], 1e-5)
                 )
-                print("   Cosine annealing scheduler created")
+                print("   📈 Cosine annealing scheduler created")
         
         # Create callbacks
         callbacks = []
@@ -258,7 +266,7 @@ def create_trainer(model, ddpm, config, device):
                 patience=safe_int(config['early_stopping']['patience'], 15),
                 min_delta=safe_float(config['early_stopping']['min_delta'], 0.001)
             ))
-            print("   Early stopping enabled")
+            print("   ⏹️  Early stopping enabled")
         
         # Model checkpointing
         if 'checkpointing' in config:
@@ -269,7 +277,7 @@ def create_trainer(model, ddpm, config, device):
                 monitor=config['checkpointing']['monitor'],
                 save_best_only=safe_bool(config['checkpointing']['save_best_only'], True)
             ))
-            print(f"   Model checkpointing: {save_path}")
+            print(f"   💾 Model checkpointing: {save_path}")
         
         # Create trainer
         trainer = DDPMMolecularTrainer(
@@ -281,35 +289,40 @@ def create_trainer(model, ddpm, config, device):
             callbacks=callbacks
         )
         
-        print(f"   Trainer created with {len(callbacks)} callbacks")
+        print(f"   🎯 Trainer created with {len(callbacks)} callbacks")
         return trainer
         
     except Exception as e:
-        print(f"Error creating trainer: {e}")
+        print(f"❌ Error creating trainer: {e}")
         import traceback
         traceback.print_exc()
         return None
 
 def main():
-    parser = argparse.ArgumentParser(description='Train DDPM EGNN Molecular Generator')
-    parser.add_argument('--config', type=str, default='config/egnn_training_config.yaml')
+    parser = argparse.ArgumentParser(description='🚀 Train DDPM Molecular Generator')
+    parser.add_argument('--config', type=str, default='config/optimized_ddpm_config.yaml',
+                       help='Path to config file')
     parser.add_argument('--test', action='store_true', help='Quick test mode')
     parser.add_argument('--epochs', type=int, help='Override epochs')
     parser.add_argument('--batch_size', type=int, help='Override batch size')
     
     args = parser.parse_args()
     
+    print("🎯 DDPM MOLECULAR GENERATOR TRAINING")
+    print("=" * 60)
+    print(f"⏰ Start time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    
     # Load configuration
     config_path = project_root / args.config
-    print(f"Loading config: {config_path}")
+    print(f"📄 Loading config: {config_path}")
     
     if not config_path.exists():
-        print(f"Config file not found: {config_path}")
+        print(f"❌ Config file not found: {config_path}")
         print("Available configs:")
         config_dir = project_root / "config"
         if config_dir.exists():
             for f in config_dir.glob("*.yaml"):
-                print(f"  {f}")
+                print(f"  📄 {f.name}")
         return
     
     with open(config_path, 'r') as f:
@@ -320,13 +333,15 @@ def main():
         config['training']['num_epochs'] = 2
         config['data']['batch_size'] = 4
         config['logging']['use_wandb'] = False
-        print("Test mode: 2 epochs, batch size 4")
+        print("🧪 Test mode: 2 epochs, batch size 4")
     
     # Apply overrides
     if args.epochs:
         config['training']['num_epochs'] = args.epochs
+        print(f"🔧 Epochs override: {args.epochs}")
     if args.batch_size:
         config['data']['batch_size'] = args.batch_size
+        print(f"🔧 Batch size override: {args.batch_size}")
     
     # Validate configuration
     config = validate_config(config)
@@ -353,6 +368,10 @@ def main():
     if trainer is None:
         return
     
+    # Start training
+    print("\n🚀 STARTING TRAINING")
+    print("=" * 60)
+    
     try:
         trainer.train(
             train_loader=train_loader,
@@ -360,9 +379,13 @@ def main():
             num_epochs=config['training']['num_epochs'],
             save_path=str(project_root / config['logging']['save_path'] / "best_model.pth")
         )
-        print("Training completed successfully")
+        
+        print("\n🎉 TRAINING COMPLETED SUCCESSFULLY!")
+        print(f"⏰ End time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"💾 Model saved to: {project_root / config['logging']['save_path']}")
+        
     except Exception as e:
-        print(f"Training failed: {e}")
+        print(f"\n❌ TRAINING FAILED: {e}")
         import traceback
         traceback.print_exc()
 
