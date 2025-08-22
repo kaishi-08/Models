@@ -374,7 +374,7 @@ class ViSNetBlock(nn.Module):
         self.cutoff = cutoff
         self.max_num_neighbors = max_num_neighbors
     
-        self.embedding = nn.Embedding(input_dim, hidden_channels)
+        self.embedding = nn.Linear(input_dim, hidden_channels)
         self.distance = Distance(cutoff, max_num_neighbors=max_num_neighbors, loop=True)
         self.sphere = Sphere(l=lmax)
         self.distance_expansion = rbf_class_mapping[rbf_type](cutoff, num_rbf, trainable_rbf)
@@ -413,16 +413,16 @@ class ViSNetBlock(nn.Module):
         
     def forward(self, data: Data) -> Tuple[Tensor, Tensor]:
         
-        z, pos, batch = data.z, data.pos, data.batch
+        x_onehot, pos, batch = data.x, data.pos, data.batch
         
         # Embedding Layers
-        x = self.embedding(z)
+        x = self.embedding(x_onehot)
         edge_index, edge_weight, edge_vec = self.distance(pos, batch)
         edge_attr = self.distance_expansion(edge_weight)
         mask = edge_index[0] != edge_index[1]
         edge_vec[mask] = edge_vec[mask] / torch.norm(edge_vec[mask], dim=1).unsqueeze(1)
         edge_vec = self.sphere(edge_vec)
-        x = self.neighbor_embedding(z, x, edge_index, edge_weight, edge_attr)
+        x = self.neighbor_embedding(x_onehot, x, edge_index, edge_weight, edge_attr)
         vec = torch.zeros(x.size(0), ((self.lmax + 1) ** 2) - 1, x.size(1), device=x.device)
         edge_attr = self.edge_embedding(edge_index, edge_attr, x)
         
