@@ -1,4 +1,3 @@
-# visnet/models/visnet_block_onehot.py
 import torch
 import torch.nn as nn
 from torch_geometric.data import Data
@@ -341,6 +340,8 @@ class ViSNetBlock(nn.Module):
 
     def __init__(
         self,
+
+        input_dim: None, #One-hot-input
         lmax=2,
         vecnorm_type='none',
         trainable_vecnorm=False,
@@ -352,10 +353,10 @@ class ViSNetBlock(nn.Module):
         trainable_rbf=False,
         activation="silu",
         attn_activation="silu",
-        max_z=100,
         cutoff=5.0,
         max_num_neighbors=32,
-        vertex_type="Edge",
+        vertex_type="Edge"
+
     ):
         super(ViSNetBlock, self).__init__()
         self.lmax = lmax
@@ -369,15 +370,15 @@ class ViSNetBlock(nn.Module):
         self.trainable_rbf = trainable_rbf
         self.activation = activation
         self.attn_activation = attn_activation
-        self.max_z = max_z
+        self.input_dim = input_dim
         self.cutoff = cutoff
         self.max_num_neighbors = max_num_neighbors
     
-        self.embedding = nn.Embedding(max_z, hidden_channels)
+        self.embedding = nn.Embedding(input_dim, hidden_channels)
         self.distance = Distance(cutoff, max_num_neighbors=max_num_neighbors, loop=True)
         self.sphere = Sphere(l=lmax)
         self.distance_expansion = rbf_class_mapping[rbf_type](cutoff, num_rbf, trainable_rbf)
-        self.neighbor_embedding = NeighborEmbedding(hidden_channels, num_rbf, cutoff, max_z).jittable()
+        self.neighbor_embedding = NeighborEmbedding(hidden_channels, num_rbf, cutoff, input_dim).jittable()
         self.edge_embedding = EdgeEmbedding(num_rbf, hidden_channels).jittable()
 
         self.vis_mp_layers = nn.ModuleList()

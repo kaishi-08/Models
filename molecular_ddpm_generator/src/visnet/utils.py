@@ -247,13 +247,22 @@ class NeighborEmbedding(MessagePassing):
         self.reset_parameters()
         
     def reset_parameters(self):
+        nn.init.xavier_uniform_(self.atom_projection.weight)
         self.atom_projection.bias.data.fill_(0)
+        
         nn.init.xavier_uniform_(self.distance_proj.weight)
-        nn.init.xavier_uniform_(self.combine.weight)
         self.distance_proj.bias.data.fill_(0)
+
+        nn.init.xavier_uniform_(self.combine.weight)
         self.combine.bias.data.fill_(0)
 
     def forward(self, x_onehot, x, edge_index, edge_weight, edge_attr):
+    
+        assert x_onehot.size(1) ==self.input_dim, f"Excepted input_dim {self.input_dim}, got {x_onehot.size(1)}"
+        assert x.size(1) == self.hidden_channels, f"Excepted hidden_dim {self.hidden_channels}, got {x.size(1)}"
+
+        if edge_index.size(1) == 0:
+            return x
         # remove self loops
         mask = edge_index[0] != edge_index[1]
         if not mask.all():
@@ -288,6 +297,7 @@ class EdgeEmbedding(MessagePassing):
         
     def forward(self, edge_index, edge_attr, x):
         # propagate_type: (x: Tensor, edge_attr: Tensor)
+
         out = self.propagate(edge_index, x=x, edge_attr=edge_attr)
         return out
     
