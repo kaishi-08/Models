@@ -203,7 +203,7 @@ class Diffusion(nn.Module):
         sigma_x = self.SNR(-0.5 * gamma_0)
         
         # Neural network prediction - chỉ predict cho ligand
-        net_out_lig = self.dynamics(z0_lig, t_zeros, lig_mask)
+        net_out_lig, _ = self.dynamics(z0_lig, t_zeros, lig_mask)
 
         # Compute mu for p(x | z0)
         mu_x_lig = self.compute_x_pred(net_out_lig, z0_lig, gamma_0, lig_mask)
@@ -287,7 +287,7 @@ class Diffusion(nn.Module):
             xh_lig, ligand['mask'], gamma_t)
 
         # Neural net prediction - pass cả ligand (noised) và protein (clean) làm điều kiện
-        net_out_lig = self.dynamics(
+        net_out_lig, _ = self.dynamics(
             z_t_lig, pocket_norm, t, ligand['mask'], pocket['mask'])
 
         # Compute L2 error cho ligand
@@ -324,7 +324,7 @@ class Diffusion(nn.Module):
             z_0_lig, eps_0_lig = self.noised_representation_ligand(
                 xh_lig, ligand['mask'], gamma_0)
 
-            net_out_0_lig = self.dynamics(
+            net_out_0_lig, _ = self.dynamics(
                 z_0_lig, pocket_norm, t_zeros, ligand['mask'], pocket['mask'])
 
             log_p_x_given_z0_without_constants_ligand, log_ph_given_z0 = \
@@ -365,7 +365,7 @@ class Diffusion(nn.Module):
         sigma_t = self.sigma(gamma_t, target_tensor=zt_lig)
 
         # Neural net prediction với protein làm điều kiện
-        eps_t_lig = self.dynamics(zt_lig, pocket, t, ligand_mask, pocket_mask)
+        eps_t_lig, _ = self.dynamics(zt_lig, pocket, t, ligand_mask, pocket_mask)
 
         # Assert mean zero cho ligand positions
         self.assert_mean_zero_with_mask(zt_lig[:, :self.n_dims], ligand_mask)
