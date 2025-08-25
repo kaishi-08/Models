@@ -192,13 +192,22 @@ class ViSNetDynamics(nn.Module):
         
         # Extract velocities from vector features
         # Use l=1 spherical harmonics (first 3 components) for 3D velocity
-        if vec_out.size(1) >= 3:
+        """
+            if vec_out.size(1) >= 3:
             vec_l1 = vec_out[:, :3, :]  # [N_total, 3, hidden_nf]
             # Project to scalar and use as velocity magnitude
             vel_magnitude = self.vel_proj(vec_l1).squeeze(-1)  # [N_total, 3]
         else:
             # Fallback: predict velocity from scalar features
+            vel_magnitude = torch.zeros(len(h_out), 3, device=h_out.device)"""
+ 
+        if vec_out.size(1) >=3:
+            vec_l1 = vec_out
+            vel_magnitude = self.vec_proj(vec_l1).squeeze(-1)
+
+        else: 
             vel_magnitude = torch.zeros(len(h_out), 3, device=h_out.device)
+    
         
         # Split outputs back to atoms and residues
         n_atoms = len(mask_atoms)
