@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from torch_geometric.data import Data
 from torch_scatter import scatter_mean, scatter_add
 import numpy as np
-from visnet.visnet_block import ViSNetBlock
+from src.visnet.visnet_block import ViSNetBlock
 
 class ViSNetDynamics(nn.Module):
 

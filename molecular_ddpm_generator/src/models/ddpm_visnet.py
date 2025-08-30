@@ -9,7 +9,6 @@ from torch_scatter import scatter_add, scatter_mean
 
 import utils
 
-
 class Diffusion(nn.Module):
     def __init__(
             self,

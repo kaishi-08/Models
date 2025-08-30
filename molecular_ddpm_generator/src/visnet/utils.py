@@ -1,9 +1,9 @@
 #Source: https://github.com/microsoft/AI2BMD/blob/ViSNet/visnet/models/utils.py
 import math
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch import Tensor
 from torch_cluster import radius_graph
 from torch_geometric.nn import MessagePassing
 

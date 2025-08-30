@@ -132,7 +132,7 @@ class CrossDockDataLoader:
         """Create training loader"""
         
         dataset = CrossDockMolecularDataset(
-            data_path=config['data']['train_path'],
+            data_path=config['train_path'],
             include_pocket=config.get('include_pocket', True),
             max_atoms=config.get('max_atoms', 50),
             augment=config.get('augment', True)
@@ -140,20 +140,20 @@ class CrossDockDataLoader:
         
         return DataLoader(
             dataset,
-            batch_size=config['data']['batch_size'],
-            shuffle=config['data'].get('shuffle', True),
-            num_workers=config['data'].get('num_workers', 4),  # Restored to 4
-            pin_memory=config['data'].get('pin_memory', True),  # Restored pin_memory
+            batch_size=config['batch_size'],
+            shuffle=config.get('shuffle', True),
+            num_workers=config.get('num_workers', 4),  # Restored to 4
+            pin_memory=config.get('pin_memory', True),  # Restored pin_memory
             collate_fn=safe_collate_crossdock_data,
             drop_last=True,
-            persistent_workers=config['data'].get('num_workers', 4) > 0  # Enable if workers > 0
+            persistent_workers=config.get('num_workers', 4) > 0  # Enable if workers > 0
         )
     
     @staticmethod
     def create_val_loader(config: Dict[str, Any]) -> DataLoader:
         """Create validation loader"""
         
-        val_path = config['data'].get('val_path', config['data']['test_path'])
+        val_path = config.get('val_path') or config.get('test_path')
         
         dataset = CrossDockMolecularDataset(
             data_path=val_path,
@@ -164,13 +164,13 @@ class CrossDockDataLoader:
         
         return DataLoader(
             dataset,
-            batch_size=config['data']['batch_size'],
+            batch_size=config['batch_size'],
             shuffle=False,
-            num_workers=config['data'].get('num_workers', 4),
-            pin_memory=config['data'].get('pin_memory', True),
+            num_workers=config.get('num_workers', 4),
+            pin_memory=config.get('pin_memory', True),
             collate_fn=safe_collate_crossdock_data,
             drop_last=False,
-            persistent_workers=config['data'].get('num_workers', 4) > 0
+            persistent_workers=config.get('num_workers', 4) > 0
         )
     
     @staticmethod
@@ -178,7 +178,7 @@ class CrossDockDataLoader:
         """Create test loader"""
         
         dataset = CrossDockMolecularDataset(
-            data_path=config['data']['test_path'],
+            data_path=config['test_path'],
             include_pocket=config.get('include_pocket', True),
             max_atoms=config.get('max_atoms', 50),
             augment=False
@@ -186,13 +186,13 @@ class CrossDockDataLoader:
         
         return DataLoader(
             dataset,
-            batch_size=config['data']['batch_size'],
+            batch_size=config['batch_size'],
             shuffle=False,
-            num_workers=config['data'].get('num_workers', 4),
-            pin_memory=config['data'].get('pin_memory', True),
+            num_workers=config.get('num_workers', 4),
+            pin_memory=config.get('pin_memory', True),
             collate_fn=safe_collate_crossdock_data,
             drop_last=False,
-            persistent_workers=config['data'].get('num_workers', 4) > 0
+            persistent_workers=config.get('num_workers', 4) > 0
         )
 
 # Backward compatibility

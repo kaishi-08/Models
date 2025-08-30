@@ -1,12 +1,13 @@
 import torch
 import torch.nn as nn
 from torch_geometric.data import Data
+from torch import Tensor
 from typing import Tuple, Optional
 from torch import Tensor
 from torch_scatter import scatter
 from torch_geometric.nn import MessagePassing
 
-from utils import (
+from src.visnet.utils import (
     Distance, 
     Sphere, 
     VecLayerNorm,

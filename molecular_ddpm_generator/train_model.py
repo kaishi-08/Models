@@ -291,17 +291,17 @@ class DDPMTrainer:
                 self.optimizer.zero_grad()
                 
                 if pocket is not None:
-                    loss_terms, info = self.model(ligand, pocket, return_info=True)
+                    model_output = self.model(ligand, pocket, return_info=True)
                 else:
-                    # Handle ligand-only case
                     dummy_pocket = {
                         'x': torch.zeros((1, 3), device=self.device),
                         'one_hot': torch.zeros((1, self.dataset_info['residue_nf']), device=self.device),
                         'mask': torch.zeros(1, dtype=torch.long, device=self.device),
                         'size': torch.tensor([1], device=self.device)
                     }
-                    loss_terms, info = self.model(ligand, dummy_pocket, return_info=True)
-                
+                    model_output = self.model(ligand, dummy_pocket, return_info=True)
+                loss_terms = model_output[:-1]
+                info = model_output[-1]
                 # Compute loss
                 loss, loss_dict = self.loss_fn.compute_loss(loss_terms, info)
                 
