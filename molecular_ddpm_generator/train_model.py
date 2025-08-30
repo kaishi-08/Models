@@ -1,3 +1,5 @@
+# train_model.py - Updated with equivariance testing
+
 import os
 import sys
 import pickle
@@ -16,9 +18,8 @@ import logging
 # Add src to Python path
 sys.path.append('src')
 
-# Import model components
-from src.models.model import ConditionalDDPMViSNet
-from src.models.vis_dynamics import ViSNetDynamics
+# Import UPDATED model components
+from src.models.model import ConditionalDDPMViSNet  # Updated model
 from src.data.data_loaders import CrossDockDataLoader
 from src.utils.molecular_utils import MolecularMetrics
 from src.utils.evaluation_utils import MolecularEvaluator
@@ -62,7 +63,7 @@ class DDPMLoss:
         else:
             vlb_loss = loss_t.mean() + loss_0.mean()
         
-        # Additional losses
+        # Additional regularization losses
         reg_loss = torch.tensor(0.0, device=vlb_loss.device)
         
         # Position regularization
@@ -90,7 +91,7 @@ class DDPMLoss:
         return total_loss, loss_dict
 
 class DDPMTrainer:
-    """Main trainer class for DDPM molecular generation"""
+    """Main trainer class for DDPM molecular generation with equivariance testing"""
     
     def __init__(self, config):
         self.config = config
@@ -112,6 +113,9 @@ class DDPMTrainer:
         # Count parameters
         total_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
         logger.info(f"Model parameters: {total_params:,}")
+        
+        # Test initial equivariance
+        self._test_model_equivariance()
         
         # Initialize optimizer
         self.optimizer = self._build_optimizer()
@@ -147,29 +151,11 @@ class DDPMTrainer:
             }
     
     def _build_model(self):
-        """Build DDPM model with ViSNet dynamics"""
+        """Build IMPROVED DDPM model with ViSNet dynamics"""
         model_config = self.config['model']
         
-        # Build dynamics network (ViSNet)
-        dynamics = ViSNetDynamics(
-            atom_nf=self.dataset_info['atom_nf'],
-            residue_nf=self.dataset_info['residue_nf'],
-            n_dims=3,
-            hidden_nf=model_config.get('hidden_dim', 256),
-            condition_time=True,
-            update_pocket_coords=model_config.get('update_pocket_coords', False),
-            edge_cutoff_ligand=model_config.get('edge_cutoff_ligand', 5.0),
-            edge_cutoff_pocket=model_config.get('edge_cutoff_pocket', 5.0),
-            edge_cutoff_interaction=model_config.get('edge_cutoff_interaction', 5.0),
-            num_layers=model_config.get('num_layers', 6),
-            num_heads=model_config.get('num_heads', 8),
-            cutoff=model_config.get('cutoff', 5.0),
-            activation=model_config.get('activation', 'silu')
-        )
-        
-        # Build DDPM model
+        # Build DDPM model with improved ViSNet integration
         model = ConditionalDDPMViSNet(
-            dynamics=dynamics,
             atom_nf=self.dataset_info['atom_nf'],
             residue_nf=self.dataset_info['residue_nf'],
             n_dims=3,
@@ -180,10 +166,62 @@ class DDPMTrainer:
             noise_precision=model_config.get('noise_precision', 1e-4),
             loss_type=model_config.get('loss_type', 'vlb'),
             norm_values=tuple(model_config.get('norm_values', [1.0, 1.0])),
-            norm_biases=tuple(model_config.get('norm_biases', [None, 0.0]))
+            norm_biases=tuple(model_config.get('norm_biases', [None, 0.0])),
+            # ViSNet specific parameters
+            hidden_nf=model_config.get('hidden_dim', 256),
+            num_layers=model_config.get('num_layers', 6),
+            num_heads=model_config.get('num_heads', 8),
+            cutoff=model_config.get('cutoff', 5.0),
+            edge_cutoff_ligand=model_config.get('edge_cutoff_ligand', 5.0),
+            edge_cutoff_pocket=model_config.get('edge_cutoff_pocket', 8.0),
+            edge_cutoff_interaction=model_config.get('edge_cutoff_interaction', 5.0),
+            activation=model_config.get('activation', 'silu'),
+            update_pocket_coords=model_config.get('update_pocket_coords', False),
+            lmax=2,  # Spherical harmonics order
+            vecnorm_type='max_min',
+            trainable_vecnorm=True,
         )
         
         return model
+    
+    def _test_model_equivariance(self):
+        """Test that the model maintains SE(3) equivariance"""
+        logger.info("Testing SE(3) equivariance...")
+        
+        # Create dummy data for testing
+        batch_size = 2
+        n_atoms = 10
+        n_residues = 20
+        
+        # Dummy ligand data
+        ligand = {
+            'x': torch.randn(n_atoms, 3, device=self.device),
+            'one_hot': torch.zeros(n_atoms, self.dataset_info['atom_nf'], device=self.device),
+            'mask': torch.zeros(n_atoms, dtype=torch.long, device=self.device),
+            'size': torch.tensor([n_atoms], device=self.device)
+        }
+        
+        # Dummy pocket data
+        pocket = {
+            'x': torch.randn(n_residues, 3, device=self.device),
+            'one_hot': torch.zeros(n_residues, self.dataset_info['residue_nf'], device=self.device),
+            'mask': torch.zeros(n_residues, dtype=torch.long, device=self.device),
+            'size': torch.tensor([n_residues], device=self.device)
+        }
+        
+        # Set some dummy features
+        ligand['one_hot'][0, 0] = 1  # Carbon
+        pocket['one_hot'][0, 0] = 1  # Alanine
+        
+        # Test equivariance
+        with torch.no_grad():
+            error = self.model.test_equivariance(ligand, pocket)
+        
+        if error < 1e-4:
+            logger.info("✅ Model passes equivariance test!")
+        else:
+            logger.warning(f"⚠️ Model has equivariance issues (error: {error:.2e})")
+            logger.warning("This may affect the quality of generated molecules")
     
     def _build_optimizer(self):
         """Build optimizer"""
@@ -231,11 +269,11 @@ class DDPMTrainer:
         wandb_config = self.config.get('wandb', {})
         
         wandb.init(
-            project=wandb_config.get('project', 'molecular-ddpm'),
+            project=wandb_config.get('project', 'molecular-ddpm-equivariant'),
             entity=wandb_config.get('entity', None),
-            name=wandb_config.get('run_name', f"ddpm-{datetime.now().strftime('%Y%m%d-%H%M%S')}"),
+            name=wandb_config.get('run_name', f"ddpm-visnet-{datetime.now().strftime('%Y%m%d-%H%M%S')}"),
             config=self.config,
-            tags=wandb_config.get('tags', ['molecular', 'ddpm', 'generation'])
+            tags=wandb_config.get('tags', ['molecular', 'ddpm', 'visnet', 'equivariant'])
         )
         
         wandb.watch(self.model, log_freq=100)
@@ -271,10 +309,11 @@ class DDPMTrainer:
         return ligand, pocket
     
     def train_epoch(self, train_loader):
-        """Train for one epoch"""
+        """Train for one epoch with equivariance monitoring"""
         self.model.train()
         total_loss = 0
         total_samples = 0
+        equivariance_errors = []
         
         pbar = tqdm(train_loader, desc=f"Epoch {self.epoch}")
         
@@ -300,8 +339,10 @@ class DDPMTrainer:
                         'size': torch.tensor([1], device=self.device)
                     }
                     model_output = self.model(ligand, dummy_pocket, return_info=True)
+                
                 loss_terms = model_output[:-1]
                 info = model_output[-1]
+                
                 # Compute loss
                 loss, loss_dict = self.loss_fn.compute_loss(loss_terms, info)
                 
@@ -320,11 +361,19 @@ class DDPMTrainer:
                 total_loss += loss.item() * batch_size
                 total_samples += batch_size
                 
+                # Periodic equivariance check
+                if batch_idx % 100 == 0 and pocket is not None:
+                    with torch.no_grad():
+                        eq_error = self.model.test_equivariance(ligand, pocket)
+                        equivariance_errors.append(eq_error)
+                
                 # Update progress bar
+                avg_eq_error = np.mean(equivariance_errors) if equivariance_errors else 0.0
                 pbar.set_postfix({
                     'loss': f"{loss.item():.4f}",
                     'vlb': f"{loss_dict['vlb_loss']:.4f}",
-                    'lr': f"{self.optimizer.param_groups[0]['lr']:.2e}"
+                    'lr': f"{self.optimizer.param_groups[0]['lr']:.2e}",
+                    'eq_err': f"{avg_eq_error:.2e}"
                 })
                 
                 # Log to wandb
@@ -333,7 +382,8 @@ class DDPMTrainer:
                         'train/loss': loss.item(),
                         'train/learning_rate': self.optimizer.param_groups[0]['lr'],
                         'train/epoch': self.epoch,
-                        'train/step': self.step
+                        'train/step': self.step,
+                        'train/equivariance_error': avg_eq_error
                     }
                     log_dict.update({f'train/{k}': v for k, v in loss_dict.items()})
                     wandb.log(log_dict, step=self.step)
@@ -345,6 +395,10 @@ class DDPMTrainer:
                 continue
         
         avg_loss = total_loss / max(total_samples, 1)
+        avg_eq_error = np.mean(equivariance_errors) if equivariance_errors else 0.0
+        
+        logger.info(f"Epoch {self.epoch} - Avg Equivariance Error: {avg_eq_error:.2e}")
+        
         return avg_loss
     
     def validate(self, val_loader):
@@ -431,10 +485,13 @@ class DDPMTrainer:
         self.best_val_loss = checkpoint.get('best_val_loss', float('inf'))
         
         logger.info(f"Resumed from epoch {self.epoch}, step {self.step}")
+        
+        # Test equivariance after loading
+        self._test_model_equivariance()
     
     def train(self):
-        """Main training loop"""
-        logger.info("Starting training...")
+        """Main training loop with equivariance monitoring"""
+        logger.info("Starting training with SE(3) equivariance monitoring...")
         
         # Load data
         train_config = self.config['data'].copy()
@@ -501,11 +558,12 @@ def load_config(config_path):
     return config
 
 def main():
-    parser = argparse.ArgumentParser(description='Train molecular DDPM model')
+    parser = argparse.ArgumentParser(description='Train molecular DDPM model with ViSNet')
     parser.add_argument('--config', type=str, required=True, help='Path to config file')
     parser.add_argument('--resume', type=str, default=None, help='Path to checkpoint to resume from')
     parser.add_argument('--device', type=str, default=None, help='Device to use (cuda/cpu)')
     parser.add_argument('--output_dir', type=str, default=None, help='Output directory')
+    parser.add_argument('--test_equivariance', action='store_true', help='Test equivariance and exit')
     
     args = parser.parse_args()
     
@@ -529,6 +587,11 @@ def main():
     # Resume from checkpoint if specified
     if args.resume:
         trainer.load_checkpoint(args.resume)
+    
+    # Test equivariance only
+    if args.test_equivariance:
+        logger.info("Testing equivariance only...")
+        return
     
     # Start training
     try:

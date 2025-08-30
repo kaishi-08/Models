@@ -30,6 +30,9 @@ model:
   edge_cutoff_ligand: 5.0
   edge_cutoff_pocket: 8.0
   edge_cutoff_interaction: 5.0
+  lmax: 2
+  vecnorm_type: 'max_min'
+  trainable_vecnorm: true
   
   # DDPM parameters
   timesteps: 1000
