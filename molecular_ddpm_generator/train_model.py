@@ -161,7 +161,7 @@ class DDPMTrainer:
             n_dims=3,
             size_histogram=self.dataset_info.get('size_histogram'),
             #VISNET
-            hidden_nf=model_config.get('hidden_dim', 256),
+            hidden_nf=model_config.get('hidden_nf', 256),
             num_layers=model_config.get('num_layers', 6),
             num_heads=model_config.get('num_heads', 8),
             lmax=model_config.get('lmax', 2),  # <- ĐỌC TỪ CONFIG

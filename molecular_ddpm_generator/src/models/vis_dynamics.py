@@ -115,7 +115,7 @@ class ViSNetDynamics(nn.Module):
         
         # 🔗 Fusion network to combine all SH information
         self.sh_fusion = nn.Sequential(
-            nn.Linear(1 + 3 + 5, hidden_nf // 2),  # l=0(1) + l=1(3) + l=2(5)
+            nn.Linear(3 + 5, hidden_nf // 2),  #l=1(3) + l=2(5)
             nn.SiLU(),
             nn.Linear(hidden_nf // 2, 3)  # → final 3D velocity
         )
@@ -165,74 +165,55 @@ class ViSNetDynamics(nn.Module):
     
     def extract_all_spherical_harmonics(self, vec_features):
         """
-        🌟 MAIN INNOVATION: Extract và utilize ALL spherical harmonics orders
+        🌟 MAIN INNOVATION: Extract spherical harmonics (ViSNet 8D convention)
         
-        Input: vec_features [N, total_sh_dim, hidden_nf]
-        Output: Combined prediction using all orders
+        Input: vec_features [N, 8, hidden_nf]  # ViSNet: l=1(3) + l=2(5), no l=0
+        Output: Combined prediction using l=1,2 orders
         """
         batch_size = vec_features.size(0)
         device = vec_features.device
         
-        if vec_features.size(1) < self.total_sh_dim:
-            print(f"⚠️ Warning: Expected {self.total_sh_dim} SH components, got {vec_features.size(1)}")
+        # ViSNet outputs 8 dimensions: l=1(3) + l=2(5), no l=0
+        if vec_features.size(1) < 8:
+            print(f"⚠️ Warning: Expected 8 SH components, got {vec_features.size(1)}")
             return self._fallback_simple_extraction(vec_features)
         
-        # 📊 Dictionary to store extracted features
+        # Extract features directly (no l=0)
         sh_features = {}
-        current_idx = 0
         
-        # 🔵 Extract l=0 features (scalars)
-        if 0 in self.sh_dimensions:
-            l0_dim = self.sh_dimensions[0]  # Should be 1
-            l0_raw = vec_features[:, current_idx:current_idx + l0_dim, :]  # [N, 1, hidden]
-            l0_scalars = self.l0_decoder(l0_raw).squeeze(-1)  # [N, 1]
-            sh_features['l0'] = l0_scalars
-            current_idx += l0_dim
+        # Extract l=1 features (first 3 components)
+        l1_raw = vec_features[:, 0:3, :]  # [N, 3, hidden]
+        l1_vectors = self.l1_decoder(l1_raw).squeeze(-1)  # [N, 3]
+        sh_features['l1'] = l1_vectors
         
-        # 🟢 Extract l=1 features (vectors)
-        if 1 in self.sh_dimensions:
-            l1_dim = self.sh_dimensions[1]  # Should be 3
-            l1_raw = vec_features[:, current_idx:current_idx + l1_dim, :]  # [N, 3, hidden]
-            l1_vectors = self.l1_decoder(l1_raw).squeeze(-1)  # [N, 3]
-            sh_features['l1'] = l1_vectors
-            current_idx += l1_dim
+        # Extract l=2 features (next 5 components)
+        l2_raw = vec_features[:, 3:8, :]  # [N, 5, hidden]  
+        l2_quadrupoles = self.l2_decoder(l2_raw).squeeze(-1)  # [N, 5]
+        sh_features['l2'] = l2_quadrupoles
         
-        # 🔴 Extract l=2 features (quadrupoles)
-        if 2 in self.sh_dimensions:
-            l2_dim = self.sh_dimensions[2]  # Should be 5
-            l2_raw = vec_features[:, current_idx:current_idx + l2_dim, :]  # [N, 5, hidden]
-            l2_quadrupoles = self.l2_decoder(l2_raw).squeeze(-1)  # [N, 5]
-            sh_features['l2'] = l2_quadrupoles
-            current_idx += l2_dim
-        
-        # 🎯 Combine all spherical harmonics information
+        # Combine l=1 and l=2 (modify existing _fuse_spherical_harmonics)
         final_velocities = self._fuse_spherical_harmonics(sh_features)
         
         return final_velocities, sh_features
     
+    def _calculate_sh_dimensions_no_l0(self, lmax):
+        return {l: 2*l + 1 for l in range(1, lmax + 1)} 
+    
     def _fuse_spherical_harmonics(self, sh_features):
-        """
-        🔀 Advanced fusion of all spherical harmonics orders
-        
-        This is where the MAGIC happens - combining:
-        - l=0: Energy-based modulation
-        - l=1: Primary directional information  
-        - l=2: Angular strain corrections
-        """
+
         device = list(sh_features.values())[0].device
         batch_size = list(sh_features.values())[0].size(0)
         
-        # 📊 Prepare components for fusion
-        l0 = sh_features.get('l0', torch.zeros(batch_size, 1, device=device))      # [N, 1]
+
         l1 = sh_features.get('l1', torch.zeros(batch_size, 3, device=device))      # [N, 3] 
         l2 = sh_features.get('l2', torch.zeros(batch_size, 5, device=device))      # [N, 5]
         
         # 🎛️ Method 1: Simple concatenation + learned fusion
-        combined_features = torch.cat([l0, l1, l2], dim=1)  # [N, 1+3+5=9]
+        combined_features = torch.cat([l1, l2], dim=1)  # [N, 3+5=8]
         fused_velocities = self.sh_fusion(combined_features)  # [N, 3]
         
         # 🧪 Method 2: Physics-inspired combination (advanced)
-        physics_velocities = self._physics_inspired_fusion(l0, l1, l2)
+        physics_velocities = self._physics_inspired_fusion(l1, l2)
         
         # 🎯 Combine both methods (weighted average)
         alpha = 0.7  # Weight for learned fusion vs physics fusion
@@ -240,19 +221,14 @@ class ViSNetDynamics(nn.Module):
         
         return final_velocities
     
-    def _physics_inspired_fusion(self, l0, l1, l2):
-        """
-        🧬 Physics-inspired combination of spherical harmonics
-        
-        Based on principles from quantum chemistry and molecular mechanics
-        """
+    def _physics_inspired_fusion(self, l1, l2):
+
         # l=1 provides base directional information
         base_velocity = l1  # [N, 3]
         
-        # l=0 modulates the magnitude (energy-like scaling)
-        magnitude_scaling = torch.sigmoid(l0).unsqueeze(-1)  # [N, 1] → [N, 1, 1]
-        scaled_velocity = base_velocity * magnitude_scaling.squeeze(-1)  # [N, 3]
-        
+        l2_magnitude = torch.norm(l2, dim=1, keepdim=True)
+        magnitude_scaling = torch.sigmoid(l2_magnitude)
+        scaled_velocity = base_velocity + magnitude_scaling
         # l=2 provides angular corrections (simplified)
         # In reality, this needs proper spherical harmonics mathematics
         angular_correction = self._convert_l2_to_directional(l2)  # [N, 3]
