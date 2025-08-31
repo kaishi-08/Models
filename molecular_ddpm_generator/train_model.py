@@ -371,7 +371,7 @@ class DDPMTrainer:
                         equivariance_errors.append(eq_error)
                 
                 # Update progress bar
-                avg_eq_error = np.mean(equivariance_errors) if equivariance_errors else 0.0
+                avg_eq_error = np.mean([err.cpu().item() if isinstance(err, torch.Tensor) else err for err in equivariance_errors]) if equivariance_errors else 0.0
                 pbar.set_postfix({
                     'loss': f"{loss.item():.4f}",
                     'vlb': f"{loss_dict['vlb_loss']:.4f}",

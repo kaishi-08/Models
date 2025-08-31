@@ -331,11 +331,16 @@ class ViSNetDynamics(nn.Module):
         if not self.update_pocket_coords:
             vel_residues = torch.zeros_like(vel_residues)
             
-        vel_atoms = self.remove_mean_batch(vel_atoms, mask_atoms)
+        combined_vel = torch.cat([vel_atoms, vel_residues], dim=0)
+        combined_mask = torch.cat([mask_atoms, mask_residues], dim=0)
+        combined_vel_centered = self.remove_mean_batch(combined_vel, combined_mask)
+
+        # Split back
+        vel_atoms = combined_vel_centered[:len(mask_atoms)]
         if self.update_pocket_coords:
-            vel_residues = self.remove_mean_batch(vel_residues, mask_residues)
+            vel_residues = combined_vel_centered[len(mask_atoms):]
         else:
-            vel_residues = torch.zeros_like(vel_residues)
+            vel_residues = torch.zeros_like(combined_vel_centered[len(mask_atoms):])
                 
         # Safety checks
         if torch.any(torch.isnan(vel_atoms)) or torch.any(torch.isinf(vel_atoms)):
@@ -398,9 +403,9 @@ class ViSNetDynamics(nn.Module):
         """Test SE(3) equivariance of the dynamics"""
         x_atoms_orig = xh_atoms[:, :self.n_dims] 
         x_pocket_orig = xh_pocket[:, :self.n_dims]
-        x_atoms_orig, x_pocket_orig = self.remove_mean_batch_simple(x_atoms_orig, x_pocket_orig)
-        xh_atoms = torch.cat([x_atoms_orig, xh_atoms[:, self.n_dims:]], dim=1)
-        xh_pocket = torch.cat([x_pocket_orig, xh_pocket[:, self.n_dims:]], dim=1)
+        
+        xh_atoms = xh_atoms  
+        xh_pocket = xh_pocket 
         
         # Generate random rotation and translation
         R = self._random_rotation_matrix().to(xh_atoms.device)
