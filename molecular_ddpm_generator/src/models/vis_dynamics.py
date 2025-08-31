@@ -50,13 +50,13 @@ class ViSNetDynamics(nn.Module):
         self.edge_cutoff_i = edge_cutoff_interaction
         
         # 🧮 Calculate spherical harmonics dimensions
-        self.sh_dimensions = self._calculate_sh_dimensions(lmax)
+        self.sh_dimensions = self._calculate_sh_dimensions_no_l0(lmax)
         self.total_sh_dim = sum(self.sh_dimensions.values())
         
-        print(f"🌐 Spherical Harmonics Structure (lmax={lmax}):")
+        print(f"Spherical Harmonics Structure (lmax={lmax}):")
         for l, dim in self.sh_dimensions.items():
             print(f"   l={l}: {dim} components ({self._get_physical_meaning(l)})")
-        print(f"📊 Total SH dimensions: {self.total_sh_dim}")
+        print(f"Total SH dimensions: {self.total_sh_dim}")
         
         # Input dimension for ViSNet
         total_input_dim = hidden_nf
@@ -358,8 +358,8 @@ class ViSNetDynamics(nn.Module):
         # 🚀 ViSNet forward pass - generates FULL spherical harmonics
         h_out, vec_out = self.visnet(data)
         
-        print(f"📊 ViSNet output shapes: h_out={h_out.shape}, vec_out={vec_out.shape}")
-        print(f"🌐 Expected SH dimensions: {self.total_sh_dim}")
+        #print(f"📊 ViSNet output shapes: h_out={h_out.shape}, vec_out={vec_out.shape}")
+        #print(f"🌐 Expected SH dimensions: {self.total_sh_dim}")
         
         # 🌟 KEY INNOVATION: Extract ALL spherical harmonics information
         velocities, sh_analysis = self.extract_all_spherical_harmonics(vec_out)
@@ -446,3 +446,71 @@ class ViSNetDynamics(nn.Module):
         print(f"🎯 Active SH orders: {list(sh_breakdown.keys())}")
         
         return analysis
+    
+    def check_equivariance(self, xh_atoms, xh_pocket, t, mask_atoms, mask_pocket):
+        """Test SE(3) equivariance of the dynamics"""
+        x_atoms_orig = xh_atoms[:, :self.n_dims] 
+        x_pocket_orig = xh_pocket[:, :self.n_dims]
+        x_atoms_orig, x_pocket_orig = self.remove_mean_batch_simple(x_atoms_orig, x_pocket_orig)
+        xh_atoms = torch.cat([x_atoms_orig, xh_atoms[:, self.n_dims:]], dim=1)
+        xh_pocket = torch.cat([x_pocket_orig, xh_pocket[:, self.n_dims:]], dim=1)
+        
+        # Generate random rotation and translation
+        R = self._random_rotation_matrix().to(xh_atoms.device)
+        translation = torch.randn(3, device=xh_atoms.device) * 0.1
+        
+        # Original coordinates
+        x_atoms_orig = xh_atoms[:, :self.n_dims]
+        x_pocket_orig = xh_pocket[:, :self.n_dims]
+        
+        # Transformed coordinates
+        x_atoms_rot = torch.matmul(x_atoms_orig, R.T) + translation
+        x_pocket_rot = torch.matmul(x_pocket_orig, R.T) + translation
+        
+        # Create transformed inputs
+        xh_atoms_rot = torch.cat([x_atoms_rot, xh_atoms[:, self.n_dims:]], dim=1)
+        xh_pocket_rot = torch.cat([x_pocket_rot, xh_pocket[:, self.n_dims:]], dim=1)
+        
+        # Forward pass on original
+        out_orig_atoms, out_orig_pocket, _ = self.forward(
+            xh_atoms, xh_pocket, t, mask_atoms, mask_pocket
+        )
+        
+        # Forward pass on transformed
+        out_rot_atoms, out_rot_pocket, _ = self.forward(
+            xh_atoms_rot, xh_pocket_rot, t, mask_atoms, mask_pocket
+        )
+        
+        # Expected transformed output
+        expected_atoms = torch.cat([
+            torch.matmul(out_orig_atoms[:, :self.n_dims], R.T),
+            out_orig_atoms[:, self.n_dims:]  # Features unchanged
+        ], dim=1)
+        
+        expected_pocket = torch.cat([
+            torch.matmul(out_orig_pocket[:, :self.n_dims], R.T),
+            out_orig_pocket[:, self.n_dims:]
+        ], dim=1)
+        
+        # Compute errors
+        error_atoms = torch.norm(out_rot_atoms - expected_atoms, dim=-1).mean()
+        error_pocket = torch.norm(out_rot_pocket - expected_pocket, dim=-1).mean()
+        
+        return (error_atoms + error_pocket).cpu().item()
+
+    def _random_rotation_matrix(self):
+        """Generate random 3D rotation matrix"""
+        q = torch.randn(4)
+        q = q / torch.norm(q)
+        w, x, y, z = q
+        rotation_matrix = torch.tensor([
+            [1-2*(y**2+z**2), 2*(x*y-w*z), 2*(x*z+w*y)],
+            [2*(x*y+w*z), 1-2*(x**2+z**2), 2*(y*z-w*x)],
+            [2*(x*z-w*y), 2*(y*z+w*x), 1-2*(x**2+y**2)]
+        ], dtype=torch.float)
+        return rotation_matrix
+    def remove_mean_batch_simple(self, x_atoms, x_pocket):
+        """Simple COM removal for testing"""
+        all_coords = torch.cat([x_atoms, x_pocket], dim=0)
+        com = all_coords.mean(dim=0, keepdim=True)
+        return x_atoms - com, x_pocket - com

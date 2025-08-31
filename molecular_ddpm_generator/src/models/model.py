@@ -178,10 +178,16 @@ class ConditionalDDPMViSNet(nn.Module):
 
     @classmethod
     def remove_mean_batch(cls, x_lig, x_pocket, lig_indices, pocket_indices):
-        """
-        Remove center of mass following DiffSBDD ConditionalDDPM approach:
-        Use LIGAND COM as reference frame, pocket follows ligand movement.
-        """
+        # ✅ ĐÚNG: Dùng COM của toàn bộ system
+        all_coords = torch.cat([x_lig, x_pocket], dim=0)
+        all_indices = torch.cat([lig_indices, pocket_indices], dim=0)
+        mean = scatter_mean(all_coords, all_indices, dim=0)
+        
+        x_lig = x_lig - mean[lig_indices] 
+        x_pocket = x_pocket - mean[pocket_indices]
+        return x_lig, x_pocket
+    
+    """def remove_mean_batch(cls, x_lig, x_pocket, lig_indices, pocket_indices):
         # Compute ligand center of mass
         mean = scatter_mean(x_lig, lig_indices, dim=0)
         
@@ -190,7 +196,7 @@ class ConditionalDDPMViSNet(nn.Module):
         x_lig = x_lig - mean[lig_indices]
         x_pocket = x_pocket - mean[pocket_indices]
         
-        return x_lig, x_pocket
+        return x_lig, x_pocket"""
 
     def test_equivariance(self, ligand, pocket):
         """
