@@ -113,11 +113,11 @@ class ViSNetDynamics(nn.Module):
             nn.Linear(hidden_nf, residue_nf)
         )
         
-        # 🔗 Fusion network to combine all SH information
-        self.sh_fusion = nn.Sequential(
-            nn.Linear(3 + 5, hidden_nf // 2),  #l=1(3) + l=2(5)
+        self.magnitude_processor = nn.Sequential(
+            nn.Linear(5, 16),  # Process l=2 magnitude only
             nn.SiLU(),
-            nn.Linear(hidden_nf // 2, 3)  # → final 3D velocity
+            nn.Linear(16, 1),
+            nn.Sigmoid()
         )
         
         # Edge type embedding
@@ -200,68 +200,20 @@ class ViSNetDynamics(nn.Module):
         return {l: 2*l + 1 for l in range(1, lmax + 1)} 
     
     def _fuse_spherical_harmonics(self, sh_features):
-
         device = list(sh_features.values())[0].device
         batch_size = list(sh_features.values())[0].size(0)
         
-
         l1 = sh_features.get('l1', torch.zeros(batch_size, 3, device=device))      # [N, 3] 
         l2 = sh_features.get('l2', torch.zeros(batch_size, 5, device=device))      # [N, 5]
         
-        # 🎛️ Method 1: Simple concatenation + learned fusion
-        combined_features = torch.cat([l1, l2], dim=1)  # [N, 3+5=8]
-        fused_velocities = self.sh_fusion(combined_features)  # [N, 3]
+        # Chỉ sử dụng l=1 (equivariant), l=2 chỉ để scale magnitude (invariant)
+        l2_magnitude = torch.norm(l2, dim=1, keepdim=True)  # [N, 1] - invariant
+        magnitude_scaling = torch.sigmoid(l2_magnitude)      # [N, 1] - invariant
         
-        # 🧪 Method 2: Physics-inspired combination (advanced)
-        physics_velocities = self._physics_inspired_fusion(l1, l2)
-        
-        # 🎯 Combine both methods (weighted average)
-        alpha = 0.7  # Weight for learned fusion vs physics fusion
-        final_velocities = alpha * fused_velocities + (1 - alpha) * physics_velocities
+        # Final: l=1 vectors với magnitude correction từ l=2
+        final_velocities = l1 * (1.0 + 0.1 * magnitude_scaling)
         
         return final_velocities
-    
-    def _physics_inspired_fusion(self, l1, l2):
-
-        # l=1 provides base directional information
-        base_velocity = l1  # [N, 3]
-        
-        l2_magnitude = torch.norm(l2, dim=1, keepdim=True)
-        magnitude_scaling = torch.sigmoid(l2_magnitude)
-        scaled_velocity = base_velocity + magnitude_scaling
-        # l=2 provides angular corrections (simplified)
-        # In reality, this needs proper spherical harmonics mathematics
-        angular_correction = self._convert_l2_to_directional(l2)  # [N, 3]
-        
-        # Final combination
-        corrected_velocity = scaled_velocity + 0.1 * angular_correction
-        
-        return corrected_velocity
-    
-    def _convert_l2_to_directional(self, l2_features):
-        """
-        Convert l=2 spherical harmonics to 3D directional corrections
-        
-        This is a SIMPLIFIED version. Full implementation requires:
-        - Proper spherical harmonics rotation matrices
-        - Clebsch-Gordan coefficients
-        - Wigner D-matrices
-        """
-        batch_size = l2_features.size(0)
-        device = l2_features.device
-        
-        # 🎯 Simplified mapping: l=2 components → xyz directions
-        # Real implementation would use proper SH mathematics
-        directional = torch.zeros(batch_size, 3, device=device)
-        
-        # Approximate influence of each l=2 component on x,y,z
-        # These coefficients come from angular momentum theory
-        directional[:, 0] = l2_features[:, 0] + l2_features[:, 4] * 0.5  # x-component
-        directional[:, 1] = l2_features[:, 1] + l2_features[:, 3] * 0.5  # y-component  
-        directional[:, 2] = l2_features[:, 2]                            # z-component
-        
-        # Small scaling to prevent instability
-        return directional * 0.1
     
     def _fallback_simple_extraction(self, vec_features):
         """Fallback cho trường hợp không đủ SH dimensions"""
@@ -379,17 +331,12 @@ class ViSNetDynamics(nn.Module):
         if not self.update_pocket_coords:
             vel_residues = torch.zeros_like(vel_residues)
             
-        # Center of mass correction (translation invariance)
-        combined_vel = torch.cat([vel_atoms, vel_residues], dim=0)
-        combined_mask = torch.cat([mask_atoms, mask_residues], dim=0)
-        combined_vel = self.remove_mean_batch(combined_vel, combined_mask)
-        
-        vel_atoms = combined_vel[:n_atoms]
+        vel_atoms = self.remove_mean_batch(vel_atoms, mask_atoms)
         if self.update_pocket_coords:
-            vel_residues = combined_vel[n_atoms:]
+            vel_residues = self.remove_mean_batch(vel_residues, mask_residues)
         else:
-            vel_residues = torch.zeros_like(combined_vel[n_atoms:])
-        
+            vel_residues = torch.zeros_like(vel_residues)
+                
         # Safety checks
         if torch.any(torch.isnan(vel_atoms)) or torch.any(torch.isinf(vel_atoms)):
             print("⚠️ Warning: NaN/Inf in atom velocities")
@@ -510,7 +457,13 @@ class ViSNetDynamics(nn.Module):
         ], dtype=torch.float)
         return rotation_matrix
     def remove_mean_batch_simple(self, x_atoms, x_pocket):
-        """Simple COM removal for testing"""
+        """Simple COM removal for testing"""  
+        # Tạo fake batch indices cho consistency
+        atom_batch = torch.zeros(x_atoms.size(0), dtype=torch.long, device=x_atoms.device)
+        pocket_batch = torch.zeros(x_pocket.size(0), dtype=torch.long, device=x_pocket.device)
+        
         all_coords = torch.cat([x_atoms, x_pocket], dim=0)
-        com = all_coords.mean(dim=0, keepdim=True)
-        return x_atoms - com, x_pocket - com
+        all_indices = torch.cat([atom_batch, pocket_batch], dim=0)
+        mean = scatter_mean(all_coords, all_indices, dim=0)
+        
+        return x_atoms - mean[0], x_pocket - mean[0]
