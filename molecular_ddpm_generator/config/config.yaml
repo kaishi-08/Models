@@ -20,7 +20,7 @@ data:
 # Model architecture
 model:
   # ViSNet dynamics parameters
-  hidden_dim: 256
+  hidden_nf: 256
   num_layers: 6
   num_heads: 8
   cutoff: 5.0
@@ -30,9 +30,19 @@ model:
   edge_cutoff_ligand: 5.0
   edge_cutoff_pocket: 8.0
   edge_cutoff_interaction: 5.0
+  
+  #Spherical harmonics parameters 
   lmax: 2
   vecnorm_type: 'max_min'
   trainable_vecnorm: true
+
+  # ViSNet specific parameters - ADDED for completeness
+  num_rbf: 32
+  rbf_type: 'expnorm'
+  trainable_rbf: false
+  attn_activation: 'silu'
+  max_num_neighbors: 32
+  vertex_type: 'Edge'      # Options: 'Edge', 'Node', 'None'
   
   # DDPM parameters
   timesteps: 1000

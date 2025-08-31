@@ -160,6 +160,20 @@ class DDPMTrainer:
             residue_nf=self.dataset_info['residue_nf'],
             n_dims=3,
             size_histogram=self.dataset_info.get('size_histogram'),
+            #VISNET
+            hidden_nf=model_config.get('hidden_dim', 256),
+            num_layers=model_config.get('num_layers', 6),
+            num_heads=model_config.get('num_heads', 8),
+            lmax=model_config.get('lmax', 2),  # <- ĐỌC TỪ CONFIG
+            vecnorm_type=model_config.get('vecnorm_type', 'max_min'),
+            trainable_vecnorm=model_config.get('trainable_vecnorm', True),
+            edge_cutoff_ligand=model_config.get('edge_cutoff_ligand', 5.0),
+            edge_cutoff_pocket=model_config.get('edge_cutoff_pocket', 8.0),
+            edge_cutoff_interaction=model_config.get('edge_cutoff_interaction', 5.0),
+            activation=model_config.get('activation', 'silu'),
+            cutoff=model_config.get('cutoff', 5.0),
+            update_pocket_coords=model_config.get('update_pocket_coords', False),
+            #DDPM parameters
             timesteps=model_config.get('timesteps', 1000),
             parametrization=model_config.get('parametrization', 'eps'),
             noise_schedule=model_config.get('noise_schedule', 'cosine'),
@@ -167,21 +181,10 @@ class DDPMTrainer:
             loss_type=model_config.get('loss_type', 'vlb'),
             norm_values=tuple(model_config.get('norm_values', [1.0, 1.0])),
             norm_biases=tuple(model_config.get('norm_biases', [None, 0.0])),
-            # ViSNet specific parameters
-            hidden_nf=model_config.get('hidden_dim', 256),
-            num_layers=model_config.get('num_layers', 6),
-            num_heads=model_config.get('num_heads', 8),
-            cutoff=model_config.get('cutoff', 5.0),
-            edge_cutoff_ligand=model_config.get('edge_cutoff_ligand', 5.0),
-            edge_cutoff_pocket=model_config.get('edge_cutoff_pocket', 8.0),
-            edge_cutoff_interaction=model_config.get('edge_cutoff_interaction', 5.0),
-            activation=model_config.get('activation', 'silu'),
-            update_pocket_coords=model_config.get('update_pocket_coords', False),
-            lmax=2,  # Spherical harmonics order
-            vecnorm_type='max_min',
-            trainable_vecnorm=True,
         )
         
+        logger.info(f"Model built with lmax={model_config.get('lmax', 2)}")
+
         return model
     
     def _test_model_equivariance(self):
