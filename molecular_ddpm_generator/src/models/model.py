@@ -8,14 +8,25 @@ from torch_scatter import scatter_add, scatter_mean
 from .vis_dynamics import ViSNetDynamics
 from ..utils import molecular_utils
 
-
 class ConditionalDDPMViSNet(nn.Module):
     def __init__(
             self,
-            dynamics: ViSNetDynamics,
             atom_nf: int,
             residue_nf: int,
             n_dims: int = 3,
+            #visnet_parameter
+            hidden_nf: int = 256,
+            num_layers: int = 6,
+            num_heads: int = 8,
+            lmax: int =2, 
+            vecnorm_type: str = 'max_min',
+            trainable_vecnorm: bool = True,
+            edge_cutoff_ligand: float = 5.0,
+            edge_cutoff_pocket: float = 8.0,
+            edge_cutoff_interaction: float = 5.0,
+            activation: str = 'silu',
+            cutoff: float = 5.0,
+            update_pocket_coords: bool = False,
             size_histogram: dict = None,
             timesteps: int = 1000,
             parametrization: str = 'eps',
@@ -31,11 +42,27 @@ class ConditionalDDPMViSNet(nn.Module):
         assert loss_type in {'vlb', 'l2'}
         assert parametrization == 'eps'
         
-        # Ensure dynamics doesn't update pocket coords (fixed condition)
-        assert not dynamics.update_pocket_coords, \
+        self.dynamics = ViSNetDynamics(
+            atom_nf=atom_nf,
+            residue_nf=residue_nf,
+            n_dims=n_dims,
+            hidden_nf=hidden_nf,
+            num_layers=num_layers,
+            num_heads=num_heads,
+            lmax=lmax,  
+            vecnorm_type=vecnorm_type,
+            trainable_vecnorm=trainable_vecnorm,
+            edge_cutoff_ligand=edge_cutoff_ligand,
+            edge_cutoff_pocket=edge_cutoff_pocket,
+            edge_cutoff_interaction=edge_cutoff_interaction,
+            activation=activation,
+            cutoff=cutoff,
+            update_pocket_coords=update_pocket_coords
+    )
+                # Ensure dynamics doesn't update pocket coords (fixed condition)
+        assert not self.dynamics.update_pocket_coords, \
             "Pocket coordinates should not be updated in conditional model"
         
-        self.dynamics = dynamics
         self.atom_nf = atom_nf
         self.residue_nf = residue_nf
         self.n_dims = n_dims
@@ -196,10 +223,6 @@ class ConditionalDDPMViSNet(nn.Module):
         return error
 
     def forward(self, ligand, pocket, return_info=False):
-        """
-        Forward pass - compute loss for conditional model.
-        Only ligand is noised, pocket is fixed condition.
-        """
         # Test equivariance periodically during training
         if self.training and torch.rand(1).item() < 0.001:  # 0.1% chance
             with torch.no_grad():
@@ -244,7 +267,7 @@ class ConditionalDDPMViSNet(nn.Module):
                                        ligand['mask'], pocket['mask'], gamma_t)
         
         # Neural network prediction using IMPROVED ViSNet
-        net_out_lig, _ = self.dynamics(z_t_lig, xh_pocket, t, ligand['mask'], pocket['mask'])
+        net_out_lig, _ , _= self.dynamics(z_t_lig, xh_pocket, t, ligand['mask'], pocket['mask'])
         
         # Compute L2 error
         squared_error = (eps_t_lig - net_out_lig) ** 2
@@ -271,7 +294,7 @@ class ConditionalDDPMViSNet(nn.Module):
             gamma_0 = self.inflate_batch_array(self.gamma(t_zeros), ligand['x'])
             z_0_lig, xh_pocket, eps_0_lig = \
                 self.noised_representation(xh0_lig, xh0_pocket, ligand['mask'], pocket['mask'], gamma_0)
-            net_out_0_lig, _ = self.dynamics(z_0_lig, xh_pocket, t_zeros, ligand['mask'], pocket['mask'])
+            net_out_0_lig, _, _ = self.dynamics(z_0_lig, xh_pocket, t_zeros, ligand['mask'], pocket['mask'])
             log_p_x_given_z0_without_constants_ligand, log_ph_given_z0 = \
                 self.log_pxh_given_z0_without_constants(ligand, z_0_lig, eps_0_lig, net_out_0_lig, gamma_0)
             loss_0_x_ligand = -log_p_x_given_z0_without_constants_ligand
@@ -424,101 +447,6 @@ class ConditionalDDPMViSNet(nn.Module):
     def delta_log_px(self, num_nodes):
         return -self.subspace_dimensionality(num_nodes) * np.log(self.norm_values[0])
 
-    def forward(self, ligand, pocket, return_info=False):
-        """
-        Forward pass - compute loss for conditional model.
-        Only ligand is noised, pocket is fixed condition.
-        """
-        # Normalize data
-        ligand, pocket = self.normalize(ligand, pocket)
-        
-        # Volume change (ligand only)
-        delta_log_px = self.delta_log_px(ligand['size'])
-        
-        # Sample timestep
-        lowest_t = 0 if self.training else 1
-        t_int = torch.randint(lowest_t, self.T + 1, 
-                             size=(ligand['size'].size(0), 1),
-                             device=ligand['x'].device).float()
-        s_int = t_int - 1
-        
-        t_is_zero = (t_int == 0).float()
-        t_is_not_zero = 1 - t_is_zero
-        
-        s = s_int / self.T
-        t = t_int / self.T
-        
-        # Noise schedule
-        gamma_s = self.inflate_batch_array(self.gamma(s), ligand['x'])
-        gamma_t = self.inflate_batch_array(self.gamma(t), ligand['x'])
-        
-        # Prepare input
-        xh0_lig = torch.cat([ligand['x'], ligand['one_hot']], dim=1)
-        xh0_pocket = torch.cat([pocket['x'], pocket['one_hot']], dim=1)
-        
-        # Center system (ligand COM reference)
-        xh0_lig[:, :self.n_dims], xh0_pocket[:, :self.n_dims] = \
-            self.remove_mean_batch(xh0_lig[:, :self.n_dims],
-                                   xh0_pocket[:, :self.n_dims],
-                                   ligand['mask'], pocket['mask'])
-        
-        # Add noise to ligand only
-        z_t_lig, xh_pocket, eps_t_lig = \
-            self.noised_representation(xh0_lig, xh0_pocket, 
-                                       ligand['mask'], pocket['mask'], gamma_t)
-        
-        # Neural network prediction
-        net_out_lig, _ = self.dynamics(z_t_lig, xh_pocket, t, ligand['mask'], pocket['mask'])
-        
-        # Compute L2 error
-        squared_error = (eps_t_lig - net_out_lig) ** 2
-        if self.vnode_idx is not None:
-            squared_error[ligand['one_hot'][:, self.vnode_idx].bool(), :self.n_dims] = 0
-        error_t_lig = self.sum_except_batch(squared_error, ligand['mask'])
-        
-        # SNR weighting
-        SNR_weight = (1 - self.SNR(gamma_s - gamma_t)).squeeze(1)
-        
-        # Constants and KL prior
-        neg_log_constants = -self.log_constants_p_x_given_z0(ligand['size'], error_t_lig.device)
-        kl_prior = self.kl_prior(xh0_lig, ligand['mask'], ligand['size'])
-        
-        # L0 term computation
-        if self.training:
-            log_p_x_given_z0_without_constants_ligand, log_ph_given_z0 = \
-                self.log_pxh_given_z0_without_constants(ligand, z_t_lig, eps_t_lig, net_out_lig, gamma_t)
-            loss_0_x_ligand = -log_p_x_given_z0_without_constants_ligand * t_is_zero.squeeze()
-            loss_0_h = -log_ph_given_z0 * t_is_zero.squeeze()
-            error_t_lig = error_t_lig * t_is_not_zero.squeeze()
-        else:
-            t_zeros = torch.zeros_like(s)
-            gamma_0 = self.inflate_batch_array(self.gamma(t_zeros), ligand['x'])
-            z_0_lig, xh_pocket, eps_0_lig = \
-                self.noised_representation(xh0_lig, xh0_pocket, ligand['mask'], pocket['mask'], gamma_0)
-            net_out_0_lig, _ = self.dynamics(z_0_lig, xh_pocket, t_zeros, ligand['mask'], pocket['mask'])
-            log_p_x_given_z0_without_constants_ligand, log_ph_given_z0 = \
-                self.log_pxh_given_z0_without_constants(ligand, z_0_lig, eps_0_lig, net_out_0_lig, gamma_0)
-            loss_0_x_ligand = -log_p_x_given_z0_without_constants_ligand
-            loss_0_h = -log_ph_given_z0
-        
-        # Size prior
-        log_pN = self.log_pN(ligand['size'], pocket['size'])
-        
-        # For potential LJ loss
-        xh_lig_hat = self.xh_given_zt_and_epsilon(z_t_lig, net_out_lig, gamma_t, ligand['mask'])
-        
-        info = {
-            'eps_hat_lig_x': scatter_mean(net_out_lig[:, :self.n_dims].abs().mean(1), ligand['mask'], dim=0).mean(),
-            'eps_hat_lig_h': scatter_mean(net_out_lig[:, self.n_dims:].abs().mean(1), ligand['mask'], dim=0).mean(),
-        }
-        
-        loss_terms = (delta_log_px, error_t_lig, torch.tensor(0.0), SNR_weight,
-                      loss_0_x_ligand, torch.tensor(0.0), loss_0_h,
-                      neg_log_constants, kl_prior, log_pN,
-                      t_int.squeeze(), xh_lig_hat)
-        
-        return (*loss_terms, info) if return_info else loss_terms
-
     # ==================== SAMPLING ====================
 
     def compute_x_pred(self, net_out, zt, gamma_t, batch_mask):
@@ -535,7 +463,7 @@ class ConditionalDDPMViSNet(nn.Module):
         gamma_0 = self.gamma(t_zeros)
         sigma_x = self.SNR(-0.5 * gamma_0)
         
-        net_out_lig, _ = self.dynamics(z0_lig, xh0_pocket, t_zeros, lig_mask, pocket_mask)
+        net_out_lig, _, _= self.dynamics(z0_lig, xh0_pocket, t_zeros, lig_mask, pocket_mask)
         mu_x_lig = self.compute_x_pred(net_out_lig, z0_lig, gamma_0, lig_mask)
         
         xh_lig, xh0_pocket = self.sample_normal_zero_com(
@@ -559,7 +487,7 @@ class ConditionalDDPMViSNet(nn.Module):
         sigma_s = self.sigma(gamma_s, target_tensor=zt_lig)
         sigma_t = self.sigma(gamma_t, target_tensor=zt_lig)
         
-        eps_t_lig, _ = self.dynamics(zt_lig, xh0_pocket, t, ligand_mask, pocket_mask)
+        eps_t_lig, _, _= self.dynamics(zt_lig, xh0_pocket, t, ligand_mask, pocket_mask)
         
         mu_lig = zt_lig / alpha_t_given_s[ligand_mask] - \
                  (sigma2_t_given_s / alpha_t_given_s / sigma_t)[ligand_mask] * eps_t_lig
