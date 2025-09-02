@@ -96,9 +96,9 @@ class ViSNetDynamics(nn.Module):
         )
         
         # 🎯 Multiple specialized decoders for different SH orders
-        self.l0_decoder = self._build_scalar_decoder()      # l=0 → scalars
+        #self.l0_decoder = self._build_scalar_decoder()      # l=0 → scalars
         self.l1_decoder = self._build_vector_decoder()      # l=1 → vectors  
-        self.l2_decoder = self._build_quadrupole_decoder()  # l=2 → quadrupoles
+        #self.l2_decoder = self._build_quadrupole_decoder()  # l=2 → quadrupoles
         
         # Feature decoders
         self.atom_decoder = nn.Sequential(
@@ -164,56 +164,34 @@ class ViSNetDynamics(nn.Module):
         )
     
     def extract_all_spherical_harmonics(self, vec_features):
-        """
-        🌟 MAIN INNOVATION: Extract spherical harmonics (ViSNet 8D convention)
-        
-        Input: vec_features [N, 8, hidden_nf]  # ViSNet: l=1(3) + l=2(5), no l=0
-        Output: Combined prediction using l=1,2 orders
-        """
+
         batch_size = vec_features.size(0)
         device = vec_features.device
         
-        # ViSNet outputs 8 dimensions: l=1(3) + l=2(5), no l=0
-        if vec_features.size(1) < 8:
-            print(f"⚠️ Warning: Expected 8 SH components, got {vec_features.size(1)}")
-            return self._fallback_simple_extraction(vec_features)
+
+        if vec_features.size(1) >=3:
+            l1_raw = vec_features[:, 0:3,:] #[N,3, hidden]
+            l1_vector = self.l1_decoder(l1_raw).squeeze(-1) #[N , 3]
+        else:
+            l1_vector = torch.zeros(batch_size, 3, device=device)
         
-        # Extract features directly (no l=0)
-        sh_features = {}
-        
-        # Extract l=1 features (first 3 components)
-        l1_raw = vec_features[:, 0:3, :]  # [N, 3, hidden]
-        l1_vectors = self.l1_decoder(l1_raw).squeeze(-1)  # [N, 3]
-        sh_features['l1'] = l1_vectors
-        
-        # Extract l=2 features (next 5 components)
-        l2_raw = vec_features[:, 3:8, :]  # [N, 5, hidden]  
-        l2_quadrupoles = self.l2_decoder(l2_raw).squeeze(-1)  # [N, 5]
-        sh_features['l2'] = l2_quadrupoles
-        
-        # Combine l=1 and l=2 (modify existing _fuse_spherical_harmonics)
-        final_velocities = self._fuse_spherical_harmonics(sh_features)
-        
-        return final_velocities, sh_features
+        sh_features = {'l1': l1_vector}
+
+        return l1_vector, sh_features
+
     
     def _calculate_sh_dimensions_no_l0(self, lmax):
-        return {l: 2*l + 1 for l in range(1, lmax + 1)} 
+        return {1:3} 
     
     def _fuse_spherical_harmonics(self, sh_features):
-        device = list(sh_features.values())[0].device
-        batch_size = list(sh_features.values())[0].size(0)
+
+        l1 = sh_features.get('l1')
+        if l1 is None:
+            device = list(sh_features.values())[0].device
+            batch_size = list(sh_features.values())[0].size(0)
+            return torch.zeros(batch_size, 3, device=device)
         
-        l1 = sh_features.get('l1', torch.zeros(batch_size, 3, device=device))      # [N, 3] 
-        l2 = sh_features.get('l2', torch.zeros(batch_size, 5, device=device))      # [N, 5]
-        
-        # Chỉ sử dụng l=1 (equivariant), l=2 chỉ để scale magnitude (invariant)
-        l2_magnitude = torch.norm(l2, dim=1, keepdim=True)  # [N, 1] - invariant
-        magnitude_scaling = torch.sigmoid(l2_magnitude)      # [N, 1] - invariant
-        
-        # Final: l=1 vectors với magnitude correction từ l=2
-        final_velocities = l1 * (1.0 + 0.1 * magnitude_scaling)
-        
-        return final_velocities
+        return l1  
     
     def _fallback_simple_extraction(self, vec_features):
         """Fallback cho trường hợp không đủ SH dimensions"""
@@ -307,13 +285,11 @@ class ViSNetDynamics(nn.Module):
         if edge_index.size(1) > 0:
             data.edge_attr = self.edge_type_embedding(edge_types)
         
-        # 🚀 ViSNet forward pass - generates FULL spherical harmonics
+        # ViSNet forward pass - generates FULL spherical harmonics
         h_out, vec_out = self.visnet(data)
         
-        #print(f"📊 ViSNet output shapes: h_out={h_out.shape}, vec_out={vec_out.shape}")
-        #print(f"🌐 Expected SH dimensions: {self.total_sh_dim}")
         
-        # 🌟 KEY INNOVATION: Extract ALL spherical harmonics information
+        # KEY INNOVATION: Extract ALL spherical harmonics information
         velocities, sh_analysis = self.extract_all_spherical_harmonics(vec_out)
         
         # Split outputs
@@ -376,10 +352,8 @@ class ViSNetDynamics(nn.Module):
         return x
 
     def analyze_spherical_harmonics_usage(self, xh_atoms, xh_residues, t, mask_atoms, mask_residues):
-        """
-        🔬 Analysis tool: Hiểu mức độ sử dụng mỗi SH order
-        """
-        print("\n🔬 ANALYZING SPHERICAL HARMONICS USAGE:")
+
+        print("\n ANALYZING SPHERICAL HARMONICS USAGE:")
         
         atoms_out, residues_out, analysis = self.forward(xh_atoms, xh_residues, t, mask_atoms, mask_residues)
         
@@ -394,81 +368,7 @@ class ViSNetDynamics(nn.Module):
                             for features in sh_breakdown.values() 
                             if features is not None)
         
-        print(f"📊 Total SH magnitude: {total_magnitude:.4f}")
-        print(f"🎯 Active SH orders: {list(sh_breakdown.keys())}")
+        print(f"Total SH magnitude: {total_magnitude:.4f}")
+        print(f"Active SH orders: {list(sh_breakdown.keys())}")
         
         return analysis
-    
-    def check_equivariance(self, xh_atoms, xh_pocket, t, mask_atoms, mask_pocket):
-        """Test SE(3) equivariance of the dynamics"""
-        x_atoms_orig = xh_atoms[:, :self.n_dims] 
-        x_pocket_orig = xh_pocket[:, :self.n_dims]
-        
-        xh_atoms = xh_atoms  
-        xh_pocket = xh_pocket 
-        
-        # Generate random rotation and translation
-        R = self._random_rotation_matrix().to(xh_atoms.device)
-        translation = torch.randn(3, device=xh_atoms.device) * 0.1
-        
-        # Original coordinates
-        x_atoms_orig = xh_atoms[:, :self.n_dims]
-        x_pocket_orig = xh_pocket[:, :self.n_dims]
-        
-        # Transformed coordinates
-        x_atoms_rot = torch.matmul(x_atoms_orig, R.T) + translation
-        x_pocket_rot = torch.matmul(x_pocket_orig, R.T) + translation
-        
-        # Create transformed inputs
-        xh_atoms_rot = torch.cat([x_atoms_rot, xh_atoms[:, self.n_dims:]], dim=1)
-        xh_pocket_rot = torch.cat([x_pocket_rot, xh_pocket[:, self.n_dims:]], dim=1)
-        
-        # Forward pass on original
-        out_orig_atoms, out_orig_pocket, _ = self.forward(
-            xh_atoms, xh_pocket, t, mask_atoms, mask_pocket
-        )
-        
-        # Forward pass on transformed
-        out_rot_atoms, out_rot_pocket, _ = self.forward(
-            xh_atoms_rot, xh_pocket_rot, t, mask_atoms, mask_pocket
-        )
-        
-        # Expected transformed output
-        expected_atoms = torch.cat([
-            torch.matmul(out_orig_atoms[:, :self.n_dims], R.T),
-            out_orig_atoms[:, self.n_dims:]  # Features unchanged
-        ], dim=1)
-        
-        expected_pocket = torch.cat([
-            torch.matmul(out_orig_pocket[:, :self.n_dims], R.T),
-            out_orig_pocket[:, self.n_dims:]
-        ], dim=1)
-        
-        # Compute errors
-        error_atoms = torch.norm(out_rot_atoms - expected_atoms, dim=-1).mean()
-        error_pocket = torch.norm(out_rot_pocket - expected_pocket, dim=-1).mean()
-        
-        return (error_atoms + error_pocket).cpu().item()
-
-    def _random_rotation_matrix(self):
-        """Generate random 3D rotation matrix"""
-        q = torch.randn(4)
-        q = q / torch.norm(q)
-        w, x, y, z = q
-        rotation_matrix = torch.tensor([
-            [1-2*(y**2+z**2), 2*(x*y-w*z), 2*(x*z+w*y)],
-            [2*(x*y+w*z), 1-2*(x**2+z**2), 2*(y*z-w*x)],
-            [2*(x*z-w*y), 2*(y*z+w*x), 1-2*(x**2+y**2)]
-        ], dtype=torch.float)
-        return rotation_matrix
-    def remove_mean_batch_simple(self, x_atoms, x_pocket):
-        """Simple COM removal for testing"""  
-        # Tạo fake batch indices cho consistency
-        atom_batch = torch.zeros(x_atoms.size(0), dtype=torch.long, device=x_atoms.device)
-        pocket_batch = torch.zeros(x_pocket.size(0), dtype=torch.long, device=x_pocket.device)
-        
-        all_coords = torch.cat([x_atoms, x_pocket], dim=0)
-        all_indices = torch.cat([atom_batch, pocket_batch], dim=0)
-        mean = scatter_mean(all_coords, all_indices, dim=0)
-        
-        return x_atoms - mean[0], x_pocket - mean[0]
