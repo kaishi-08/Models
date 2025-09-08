@@ -177,7 +177,6 @@ class ConditionalDDPMViSNet(nn.Module):
         return torch.cat([x_lig, h_lig], dim=1), torch.cat([x_pocket, h_pocket], dim=1)
 
     @classmethod
-    
     def remove_mean_batch(cls, x_lig, x_pocket, lig_indices, pocket_indices):
         # Compute ligand center of mass
         mean = scatter_mean(x_lig, lig_indices, dim=0)

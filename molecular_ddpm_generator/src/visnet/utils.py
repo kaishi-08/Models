@@ -229,7 +229,7 @@ class Distance(nn.Module):
         else:
             edge_weight = torch.norm(edge_vec, dim=-1)
 
-        return edge_index, edge_weight, edge_vec #edge_index: Edge in4 of graph, edge_weight: Distance
+        return edge_index, edge_weight, edge_vec # edge_index: Edge in4 of graph, edge_weight: Distance
 
 
 class NeighborEmbedding(MessagePassing):

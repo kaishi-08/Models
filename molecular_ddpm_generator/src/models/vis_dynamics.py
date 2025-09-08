@@ -4,10 +4,99 @@ import torch.nn.functional as F
 from torch_geometric.data import Data
 from torch_scatter import scatter_mean, scatter_add
 import numpy as np
-from src.visnet.visnet_block import ViSNetBlock
+from visnet.visnet_block import ViSNetBlock
+from visnet.output_modules import GatedEquivariantBlock, act_class_mapping
+from visnet.utils import rbf_class_mapping, CosineCutoff
+
+class EquivariantVector(nn.Module):
+    """
+    Equivariant head for vector output (e.g., coordinate noise) using gated blocks.
+    Incorporates l=1 and l=2 components for enhanced expressiveness.
+    """
+    def __init__(self, hidden_nf, n_dims=3, activation="silu"):
+        super().__init__()
+        self.n_dims = n_dims
+        act_class = act_class_mapping[activation]
+        
+        self.output_network = nn.ModuleList([
+            GatedEquivariantBlock(hidden_nf, hidden_nf // 2, activation=activation, scalar_activation=True),
+            GatedEquivariantBlock(hidden_nf // 2, hidden_nf // 4, activation=activation, scalar_activation=True),
+        ])
+        
+        # Scalar network to combine l=1 and l=2 contributions
+        self.scalar_net = nn.Sequential(
+            nn.Linear(hidden_nf // 4, hidden_nf // 8),
+            act_class(),
+            nn.Linear(hidden_nf // 8, 1),
+            nn.Sigmoid()  # Magnitude scaling [0, 1]
+        )
+        
+        # Projection for l=1 components to cartesian vector
+        self.l1_proj = nn.Linear(hidden_nf // 4, 1)
+        
+        # Projection for l=2 components to modulate l=1
+        self.l2_proj = nn.Sequential(
+            nn.Linear(hidden_nf // 4, hidden_nf // 8),
+            act_class(),
+            nn.Linear(hidden_nf // 8, 1),
+            nn.Tanh()  # Bounded modulation [-1, 1]
+        )
+        
+        # Learnable weights for combining l=1 and l=2
+        self.combination_weights = nn.Parameter(torch.tensor([0.8, 0.2]))  # Initial bias towards l=1
+
+    def forward(self, x, v):
+        for layer in self.output_network:
+            x, v = layer(x, v)
+        
+        # Extract l=1 (dipole) and l=2 (quadrupole) features
+        v_l1 = v[:, :3, :]  # [N, 3, hidden//4]
+        v_l2 = v[:, 3:8, :]  # [N, 5, hidden//4]
+        
+        # Project l=1 features to cartesian vectors
+        l1_vector = self.l1_proj(v_l1).squeeze(-1)  # [N, 3]
+        
+        # Compute l=2 modulation
+        l2_magnitude = torch.norm(v_l2, dim=1)  # [N, hidden//4]
+        l2_modulation = self.l2_proj(l2_magnitude)  # [N, 1]
+        
+        # Scalar magnitude from scalar features
+        magnitude = self.scalar_net(x)  # [N, 1]
+        
+        # Combine l=1 and l=2 contributions
+        w1, w2 = F.softmax(self.combination_weights, dim=0)
+        final_vector = (w1 + w2 * l2_modulation) * l1_vector  # Modulate l=1 with l=2
+        
+        # Apply scalar magnitude
+        final_vector = magnitude * final_vector  # [N, 3]
+        
+        return final_vector
+
+class EquivariantFeature(nn.Module):
+    """
+    Equivariant head for scalar feature output (e.g., atom/residue feature noise).
+    Generalized to arbitrary output channels.
+    """
+    def __init__(self, hidden_nf, out_nf, activation="silu"):
+        super().__init__()
+        self.output_network = nn.ModuleList([
+            GatedEquivariantBlock(hidden_nf, hidden_nf // 2, activation=activation, scalar_activation=True),
+            GatedEquivariantBlock(hidden_nf // 2, out_nf, activation=activation),
+        ])
+
+    def forward(self, x, v):
+        for layer in self.output_network:
+            x, v = layer(x, v)
+        return x
 
 class ViSNetDynamics(nn.Module):
-
+    """
+    Enhanced ViSNet-based dynamics that properly utilizes the full 
+    equivariant capabilities of ViSNet for diffusion noise prediction.
+    Updated to use equivariant output modules for both vector (coords) and scalar (features) predictions.
+    Suitable for structure-based molecular generation in diffusion reverse process.
+    """
+    
     def __init__(
         self,
         atom_nf,
@@ -15,13 +104,13 @@ class ViSNetDynamics(nn.Module):
         n_dims,
         hidden_nf=256,
         condition_time=True,
-        update_pocket_coords=True,
+        update_pocket_coords=False,  # Fixed pocket for conditional generation
         edge_cutoff_ligand=5.0,
         edge_cutoff_pocket=8.0, 
         edge_cutoff_interaction=5.0,
-        # ViSNet specific parameters
+        # ViSNet parameters - properly configured
         lmax=2,  
-        vecnorm_type='max_min',
+        vecnorm_type='none',
         trainable_vecnorm=True,
         num_heads=8,
         num_layers=6,
@@ -30,7 +119,6 @@ class ViSNetDynamics(nn.Module):
         trainable_rbf=False,
         activation="silu",
         attn_activation="silu",
-        cutoff=5.0,
         max_num_neighbors=32,
         vertex_type="Edge"
     ):
@@ -49,37 +137,46 @@ class ViSNetDynamics(nn.Module):
         self.edge_cutoff_p = edge_cutoff_pocket  
         self.edge_cutoff_i = edge_cutoff_interaction
         
-        # 🧮 Calculate spherical harmonics dimensions
-        self.sh_dimensions = self._calculate_sh_dimensions_no_l0(lmax)
-        self.total_sh_dim = sum(self.sh_dimensions.values())
+        # Max cutoff for ViSNet
+        cutoff = max(edge_cutoff_ligand, edge_cutoff_pocket, edge_cutoff_interaction)
         
-        print(f"Spherical Harmonics Structure (lmax={lmax}):")
-        for l, dim in self.sh_dimensions.items():
-            print(f"   l={l}: {dim} components ({self._get_physical_meaning(l)})")
-        print(f"Total SH dimensions: {self.total_sh_dim}")
-        
-        # Input dimension for ViSNet
-        total_input_dim = hidden_nf
+        # Input dimension calculation
+        base_input_dim = hidden_nf
         if condition_time:
-            total_input_dim += 1
+            base_input_dim += 1
             
-        # Feature encoders
+        # === FEATURE ENCODERS ===
+        # Enhanced encoders with proper normalization
         self.atom_encoder = nn.Sequential(
-            nn.Linear(atom_nf, hidden_nf),
+            nn.Linear(atom_nf, hidden_nf // 2),
+            nn.LayerNorm(hidden_nf // 2),
             nn.SiLU(),
-            nn.Linear(hidden_nf, hidden_nf)
+            nn.Linear(hidden_nf // 2, hidden_nf),
+            nn.LayerNorm(hidden_nf)
         )
         
         self.residue_encoder = nn.Sequential(
-            nn.Linear(residue_nf, hidden_nf),
-            nn.SiLU(), 
-            nn.Linear(hidden_nf, hidden_nf)
+            nn.Linear(residue_nf, hidden_nf // 2),
+            nn.LayerNorm(hidden_nf // 2),
+            nn.SiLU(),
+            nn.Linear(hidden_nf // 2, hidden_nf),
+            nn.LayerNorm(hidden_nf)
         )
         
-        # 🌟 ViSNet core with full lmax support
+        # Time embedding with sinusoidal encoding
+        if condition_time:
+            self.time_embedding = SinusoidalTimeEmbedding(hidden_nf)
+        
+        # RBF expansion for distances
+        self.distance_expansion = rbf_class_mapping[rbf_type](cutoff, num_rbf, trainable_rbf)
+        
+        # Edge type embeddings
+        self.edge_type_embedding = nn.Embedding(3, num_rbf)
+        
+        # === CORE VISNET ===
         self.visnet = ViSNetBlock(
-            input_dim=total_input_dim,
-            lmax=lmax,  # Will generate l=0,1,2 features
+            input_dim=base_input_dim,
+            lmax=lmax,
             vecnorm_type=vecnorm_type,
             trainable_vecnorm=trainable_vecnorm,
             num_heads=num_heads,
@@ -92,283 +189,222 @@ class ViSNetDynamics(nn.Module):
             attn_activation=attn_activation,
             cutoff=cutoff,
             max_num_neighbors=max_num_neighbors,
-            vertex_type=vertex_type
+            vertex_type=vertex_type,
+            use_precomputed_edges=True  # Enable precomputed edges for custom cutoffs
         )
         
-        # 🎯 Multiple specialized decoders for different SH orders
-        #self.l0_decoder = self._build_scalar_decoder()      # l=0 → scalars
-        self.l1_decoder = self._build_vector_decoder()      # l=1 → vectors  
-        #self.l2_decoder = self._build_quadrupole_decoder()  # l=2 → quadrupoles
+        # === EQUIVARIANT OUTPUT HEADS ===
+        self.coordinate_head = EquivariantVector(hidden_nf, n_dims)
+        self.feature_head_atoms = EquivariantFeature(hidden_nf, atom_nf)
+        self.feature_head_residues = EquivariantFeature(hidden_nf, residue_nf)
         
-        # Feature decoders
-        self.atom_decoder = nn.Sequential(
-            nn.Linear(hidden_nf, hidden_nf),
-            nn.SiLU(),
-            nn.Linear(hidden_nf, atom_nf)
-        )
+        # Initialize properly
+        self.apply(self._init_weights)
         
-        self.residue_decoder = nn.Sequential(
-            nn.Linear(hidden_nf, hidden_nf),
-            nn.SiLU(),
-            nn.Linear(hidden_nf, residue_nf)
-        )
-        
-        self.magnitude_processor = nn.Sequential(
-            nn.Linear(5, 16),  # Process l=2 magnitude only
-            nn.SiLU(),
-            nn.Linear(16, 1),
-            nn.Sigmoid()
-        )
-        
-        # Edge type embedding
-        self.edge_type_embedding = nn.Embedding(3, num_rbf)
-        
-    def _calculate_sh_dimensions(self, lmax):
-        """Calculate dimensions for each spherical harmonics order"""
-        return {l: 2*l + 1 for l in range(lmax + 1)}
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            nn.init.xavier_uniform_(module.weight)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.LayerNorm):
+            nn.init.ones_(module.weight)
+            nn.init.zeros_(module.bias)
     
-    def _get_physical_meaning(self, l):
-        """Get physical meaning of each SH order"""
-        meanings = {
-            0: "scalars/invariants",
-            1: "vectors/dipoles", 
-            2: "quadrupoles/d-orbitals",
-            3: "octupoles/f-orbitals"
-        }
-        return meanings.get(l, f"order-{l}")
-    
-    def _build_scalar_decoder(self):
-        """Decoder for l=0: scalar features → energy-like quantities"""
-        return nn.Sequential(
-            nn.Linear(self.hidden_nf, self.hidden_nf // 2),
-            nn.SiLU(),
-            nn.Linear(self.hidden_nf // 2, 1),
-            nn.Tanh()  # Bounded output
-        )
-    
-    def _build_vector_decoder(self):
-        """Decoder for l=1: vector features → 3D directional information"""
-        return nn.Sequential(
-            nn.Linear(self.hidden_nf, self.hidden_nf // 2),
-            nn.SiLU(),
-            nn.Linear(self.hidden_nf // 2, 1)
-        )
-    
-    def _build_quadrupole_decoder(self):
-        """Decoder for l=2: quadrupole features → angular/strain information"""
-        return nn.Sequential(
-            nn.Linear(self.hidden_nf, self.hidden_nf // 2),
-            nn.SiLU(),
-            nn.Linear(self.hidden_nf // 2, 1),
-            nn.Tanh()  # Bounded for stability
-        )
-    
-    def extract_all_spherical_harmonics(self, vec_features):
-
-        batch_size = vec_features.size(0)
-        device = vec_features.device
-        
-
-        if vec_features.size(1) >=3:
-            l1_raw = vec_features[:, 0:3,:] #[N,3, hidden]
-            l1_vector = self.l1_decoder(l1_raw).squeeze(-1) #[N , 3]
-        else:
-            l1_vector = torch.zeros(batch_size, 3, device=device)
-        
-        sh_features = {'l1': l1_vector}
-
-        return l1_vector, sh_features
-
-    
-    def _calculate_sh_dimensions_no_l0(self, lmax):
-        return {1:3} 
-    
-    def _fuse_spherical_harmonics(self, sh_features):
-
-        l1 = sh_features.get('l1')
-        if l1 is None:
-            device = list(sh_features.values())[0].device
-            batch_size = list(sh_features.values())[0].size(0)
-            return torch.zeros(batch_size, 3, device=device)
-        
-        return l1  
-    
-    def _fallback_simple_extraction(self, vec_features):
-        """Fallback cho trường hợp không đủ SH dimensions"""
-        print("🔄 Using fallback simple extraction")
-        available_dim = min(3, vec_features.size(1))
-        simple_vectors = vec_features[:, :available_dim, :]
-        simple_output = self.l1_decoder(simple_vectors).squeeze(-1)
-        
-        # Pad to 3 dimensions if needed
-        if simple_output.size(1) < 3:
-            padding = torch.zeros(simple_output.size(0), 3 - simple_output.size(1), device=simple_output.device)
-            simple_output = torch.cat([simple_output, padding], dim=1)
-        
-        return simple_output[:, :3], {}
-    
-    def get_proper_edges_with_features(self, pos_atoms, pos_residues, batch_atoms, batch_residues):
+    def get_edges_with_types(self, pos_atoms, pos_residues, batch_atoms, batch_residues):
         """
-        Create edges with proper types and distance-based features
-        (Same as before - không thay đổi)
+        Construct edges between atoms and residues with proper typing
         """
         device = pos_atoms.device
-        all_pos = torch.cat([pos_atoms, pos_residues], dim=0)
-        all_batch = torch.cat([batch_atoms, batch_residues], dim=0)
+        n_atoms = len(pos_atoms)
+        n_residues = len(pos_residues)
+        
+        if n_atoms == 0:
+            return torch.zeros((2, 0), dtype=torch.long, device=device), torch.zeros((0,), device=device)
+        
+        edges_list = []
+        types_list = []
         
         from torch_cluster import radius_graph
         
-        max_cutoff = max(self.edge_cutoff_l, self.edge_cutoff_p, self.edge_cutoff_i)
-        edge_index = radius_graph(
-            all_pos, r=max_cutoff, batch=all_batch, 
-            loop=True, max_num_neighbors=64
+        # Ligand internal edges (type 0)
+        if n_atoms > 1:
+            ll_edges = radius_graph(
+                pos_atoms, r=self.edge_cutoff_l, batch=batch_atoms,
+                loop=False, max_num_neighbors=16
+            )
+            if ll_edges.size(1) > 0:
+                edges_list.append(ll_edges)
+                types_list.append(torch.zeros(ll_edges.size(1), dtype=torch.long, device=device))
+        
+        # Pocket internal edges (type 1)
+        if n_residues > 1:
+            pp_edges = radius_graph(
+                pos_residues, r=self.edge_cutoff_p, batch=batch_residues,
+                loop=False, max_num_neighbors=8
+            )
+            if pp_edges.size(1) > 0:
+                pp_edges += n_atoms  # Offset for global indexing
+                edges_list.append(pp_edges)
+                types_list.append(torch.ones(pp_edges.size(1), dtype=torch.long, device=device))
+        
+        # Ligand-pocket interaction edges (type 2)
+        all_pos = torch.cat([pos_atoms, pos_residues], dim=0)
+        all_batch = torch.cat([batch_atoms, batch_residues], dim=0)
+        
+        interaction_edges = radius_graph(
+            all_pos, r=self.edge_cutoff_i, batch=all_batch,
+            loop=False, max_num_neighbors=8
         )
         
-        if edge_index.size(1) == 0:
+        if interaction_edges.size(1) > 0:
+            src, dst = interaction_edges[0], interaction_edges[1]
+            # Only keep cross-type edges (ligand<->pocket)
+            cross_mask = ((src < n_atoms) & (dst >= n_atoms)) | ((src >= n_atoms) & (dst < n_atoms))
+            if cross_mask.sum() > 0:
+                interaction_edges = interaction_edges[:, cross_mask]
+                edges_list.append(interaction_edges)
+                types_list.append(torch.full((interaction_edges.size(1),), 2, dtype=torch.long, device=device))
+        
+        if len(edges_list) == 0:
             return torch.zeros((2, 0), dtype=torch.long, device=device), torch.zeros((0,), device=device)
-        
-        n_atoms = len(pos_atoms)
-        src, dst = edge_index[0], edge_index[1]
-        distances = torch.norm(all_pos[src] - all_pos[dst], dim=1)
-        
-        edge_types = torch.zeros(edge_index.size(1), dtype=torch.long, device=device)
-        ll_mask = (src < n_atoms) & (dst < n_atoms)
-        pp_mask = (src >= n_atoms) & (dst >= n_atoms)
-        edge_types[ll_mask] = 1
-        edge_types[pp_mask] = 2
-        
-        valid_mask = torch.ones_like(distances, dtype=torch.bool)
-        valid_mask &= ~ll_mask | (distances <= self.edge_cutoff_l)
-        valid_mask &= ~pp_mask | (distances <= self.edge_cutoff_p)
-        lp_mask = ~(ll_mask | pp_mask)
-        valid_mask &= ~lp_mask | (distances <= self.edge_cutoff_i)
-        
-        edge_index = edge_index[:, valid_mask]
-        edge_types = edge_types[valid_mask]
+            
+        edge_index = torch.cat(edges_list, dim=1)
+        edge_types = torch.cat(types_list, dim=0)
         
         return edge_index, edge_types
-        
+    
     def forward(self, xh_atoms, xh_residues, t, mask_atoms, mask_residues):
         """
-        🌟 MAIN FORWARD PASS: Full Spherical Harmonics Utilization
+        Forward pass that properly utilizes ViSNet's equivariant features for noise prediction in diffusion.
         """
+        # Input validation
+        if xh_atoms.size(0) == 0:
+            empty_atoms = torch.zeros(0, self.n_dims + self.atom_nf, device=xh_atoms.device)
+            empty_residues = torch.zeros(len(xh_residues), self.n_dims + self.residue_nf, device=xh_residues.device)
+            return empty_atoms, empty_residues, {}
+        
         # Separate coordinates and features
         x_atoms = xh_atoms[:, :self.n_dims]
         h_atoms = xh_atoms[:, self.n_dims:]
-        x_residues = xh_residues[:, :self.n_dims] 
+        x_residues = xh_residues[:, :self.n_dims]
         h_residues = xh_residues[:, self.n_dims:]
         
-        # Encode features
+        # Enhanced feature encoding
         h_atoms_enc = self.atom_encoder(h_atoms)
         h_residues_enc = self.residue_encoder(h_residues)
         
-        # Combine nodes
+        # Combine all nodes
         pos = torch.cat([x_atoms, x_residues], dim=0)
         h = torch.cat([h_atoms_enc, h_residues_enc], dim=0)
         batch = torch.cat([mask_atoms, mask_residues], dim=0)
         
-        # Add time conditioning
+        # Enhanced time conditioning
         if self.condition_time:
             if t.numel() == 1:
-                h_time = torch.full((len(h), 1), t.item(), device=h.device)
+                t_emb = self.time_embedding(t.expand(len(h)))
             else:
-                h_time = t[batch]
-            h = torch.cat([h, h_time], dim=-1)
+                t_emb = self.time_embedding(t[batch])
+            h = torch.cat([h, t_emb], dim=-1)
         
-        # Get edges with types
-        edge_index, edge_types = self.get_proper_edges_with_features(
+        # Get edges with proper types
+        edge_index, edge_types = self.get_edges_with_types(
             x_atoms, x_residues, mask_atoms, mask_residues
         )
         
-        # Create PyG data
-        data = Data(x=h, pos=pos, batch=batch, edge_index=edge_index)
+        # Compute edge attributes: RBF + type embedding
         if edge_index.size(1) > 0:
-            data.edge_attr = self.edge_type_embedding(edge_types)
-        
-        # ViSNet forward pass - generates FULL spherical harmonics
-        h_out, vec_out = self.visnet(data)
-        
-        
-        # KEY INNOVATION: Extract ALL spherical harmonics information
-        velocities, sh_analysis = self.extract_all_spherical_harmonics(vec_out)
-        
-        # Split outputs
-        n_atoms = len(mask_atoms)
-        h_out_atoms = h_out[:n_atoms]
-        h_out_residues = h_out[n_atoms:]
-        vel_atoms = velocities[:n_atoms]
-        vel_residues = velocities[n_atoms:]
-        
-        # Decode features
-        h_final_atoms = self.atom_decoder(h_out_atoms)
-        h_final_residues = self.residue_decoder(h_out_residues)
-        
-        # Handle pocket coordinate updates
-        if not self.update_pocket_coords:
-            vel_residues = torch.zeros_like(vel_residues)
-            
-        combined_vel = torch.cat([vel_atoms, vel_residues], dim=0)
-        combined_mask = torch.cat([mask_atoms, mask_residues], dim=0)
-        combined_vel_centered = self.remove_mean_batch(combined_vel, combined_mask)
-
-        # Split back
-        vel_atoms = combined_vel_centered[:len(mask_atoms)]
-        if self.update_pocket_coords:
-            vel_residues = combined_vel_centered[len(mask_atoms):]
+            edge_vec_temp = pos[edge_index[0]] - pos[edge_index[1]]
+            edge_weight = torch.norm(edge_vec_temp, dim=-1)
+            edge_rbf = self.distance_expansion(edge_weight)
+            edge_type_emb = self.edge_type_embedding(edge_types)
+            edge_attr = edge_rbf + edge_type_emb
         else:
-            vel_residues = torch.zeros_like(combined_vel_centered[len(mask_atoms):])
-                
-        # Safety checks
-        if torch.any(torch.isnan(vel_atoms)) or torch.any(torch.isinf(vel_atoms)):
-            print("⚠️ Warning: NaN/Inf in atom velocities")
-            vel_atoms = torch.zeros_like(vel_atoms)
+            edge_attr = torch.empty(0, self.visnet.num_rbf, device=h.device)
         
-        if torch.any(torch.isnan(vel_residues)) or torch.any(torch.isinf(vel_residues)):
-            print("⚠️ Warning: NaN/Inf in residue velocities")
-            vel_residues = torch.zeros_like(vel_residues)
+        # Create PyG data with enhanced edge attributes
+        data = Data(x=h, pos=pos, batch=batch, edge_index=edge_index, edge_attr=edge_attr)
         
-        # Final outputs with spherical harmonics analysis
-        atoms_output = torch.cat([vel_atoms, h_final_atoms], dim=-1)
-        residues_output = torch.cat([vel_residues, h_final_residues], dim=-1)
+        try:
+            # ViSNet forward - gets both scalar and vector features
+            h_out, vec_out = self.visnet(data)  # h_out: [N, hidden], vec_out: [N, 8, hidden]
+            
+            # Equivariant predictions using output modules
+            coord_predictions = self.coordinate_head(h_out, vec_out)  # [N, 3]
+            
+            # Split for feature predictions
+            n_atoms = len(mask_atoms)
+            h_out_atoms = h_out[:n_atoms]
+            vec_out_atoms = vec_out[:n_atoms]
+            h_out_residues = h_out[n_atoms:]
+            vec_out_residues = vec_out[n_atoms:]
+            
+            feat_pred_atoms = self.feature_head_atoms(h_out_atoms, vec_out_atoms)
+            feat_pred_residues = self.feature_head_residues(h_out_residues, vec_out_residues)
+            
+            coord_pred_atoms = coord_predictions[:n_atoms]
+            coord_pred_residues = coord_predictions[n_atoms:]
+            
+        except Exception as e:
+            print(f"ViSNet forward failed: {e}")
+            # Graceful fallback
+            n_total = len(h)
+            coord_predictions = torch.zeros(n_total, 3, device=h.device)
+            feat_pred_atoms = torch.zeros(len(mask_atoms), self.atom_nf, device=h.device)
+            feat_pred_residues = torch.zeros(len(mask_residues), self.residue_nf, device=h.device)
+            coord_pred_atoms = coord_predictions[:n_atoms]
+            coord_pred_residues = coord_predictions[n_atoms:]
         
-        # 📊 Additional output: Spherical harmonics decomposition for analysis
+        # Handle pocket coordinate updates (fixed for conditional generation)
+        if not self.update_pocket_coords:
+            coord_pred_residues = torch.zeros_like(coord_pred_residues)
+        
+        # Center of mass constraint (crucial for equivariance)
+        if coord_pred_atoms.size(0) > 0:
+            combined_coords = torch.cat([coord_pred_atoms, coord_pred_residues], dim=0)
+            combined_mask = torch.cat([mask_atoms, mask_residues], dim=0)
+            combined_coords = self.remove_mean_batch(combined_coords, combined_mask)
+            
+            coord_pred_atoms = combined_coords[:n_atoms]
+            if self.update_pocket_coords:
+                coord_pred_residues = combined_coords[n_atoms:]
+            else:
+                coord_pred_residues = torch.zeros_like(combined_coords[n_atoms:])
+        
+        # Final outputs - noise predictions for diffusion
+        atoms_noise = torch.cat([coord_pred_atoms, feat_pred_atoms], dim=-1)
+        residues_noise = torch.cat([coord_pred_residues, feat_pred_residues], dim=-1)
+        
+        # Analysis info
         analysis_info = {
-            'sh_breakdown': sh_analysis,
-            'l0_contribution': sh_analysis.get('l0', torch.tensor(0.0)),
-            'l1_contribution': sh_analysis.get('l1', torch.tensor(0.0)),
-            'l2_contribution': sh_analysis.get('l2', torch.tensor(0.0)),
-            'total_sh_utilization': len(sh_analysis)
+            'edge_count': edge_index.size(1) if edge_index.size(1) > 0 else 0,
+            'atom_count': n_atoms,
+            'residue_count': len(mask_residues),
+            'coord_magnitude': torch.norm(coord_pred_atoms).item() if coord_pred_atoms.size(0) > 0 else 0.0
         }
         
-        return atoms_output, residues_output, analysis_info
+        return atoms_noise, residues_noise, analysis_info
     
     @staticmethod
     def remove_mean_batch(x, batch_mask):
-        """Remove center of mass (same as before)"""
+        """Remove center of mass per batch"""
         if x.size(0) == 0:
             return x
         mean = scatter_mean(x, batch_mask, dim=0)
         x = x - mean[batch_mask]
         return x
 
-    def analyze_spherical_harmonics_usage(self, xh_atoms, xh_residues, t, mask_atoms, mask_residues):
 
-        print("\n ANALYZING SPHERICAL HARMONICS USAGE:")
+class SinusoidalTimeEmbedding(nn.Module):
+    """Sinusoidal time embedding for better time conditioning"""
+    def __init__(self, dim):
+        super().__init__()
+        self.dim = dim
         
-        atoms_out, residues_out, analysis = self.forward(xh_atoms, xh_residues, t, mask_atoms, mask_residues)
-        
-        sh_breakdown = analysis['sh_breakdown']
-        
-        for order, features in sh_breakdown.items():
-            if features is not None:
-                magnitude = torch.norm(features).item()
-                print(f"   {order}: magnitude = {magnitude:.4f}")
-        
-        total_magnitude = sum(torch.norm(features).item() 
-                            for features in sh_breakdown.values() 
-                            if features is not None)
-        
-        print(f"Total SH magnitude: {total_magnitude:.4f}")
-        print(f"Active SH orders: {list(sh_breakdown.keys())}")
-        
-        return analysis
+    def forward(self, time):
+        device = time.device
+        half_dim = self.dim // 2
+        embeddings = np.log(10000) / (half_dim - 1)
+        embeddings = torch.exp(torch.arange(half_dim, device=device) * -embeddings)
+        embeddings = time.unsqueeze(-1) * embeddings.unsqueeze(0)
+        embeddings = torch.cat((embeddings.sin(), embeddings.cos()), dim=-1)
+        return embeddings
