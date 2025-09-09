@@ -277,7 +277,7 @@ class DDPMTrainer:
         if batch is None:
             logger.error("Received None batch")
             return None
-        try:
+        try: 
             if isinstance(batch, dict):
                 logger.debug(f"Batch keys: {batch.keys()}")
             else:
