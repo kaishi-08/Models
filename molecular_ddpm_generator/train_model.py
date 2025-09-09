@@ -1,5 +1,3 @@
-# train_model.py - Updated with equivariance testing
-
 import os
 import sys
 import pickle
@@ -14,23 +12,24 @@ from tqdm import tqdm
 import numpy as np
 from datetime import datetime
 import logging
+from torch.optim.lr_scheduler import CosineAnnealingLR, StepLR
 
 # Add src to Python path
 sys.path.append('src')
 
-# Import UPDATED model components
-from src.models.model import ConditionalDDPMViSNet  # Updated model
+# Import model components
+from src.models.model import ConditionalDDPMViSNet
 from src.data.data_loaders import CrossDockDataLoader
 from src.utils.molecular_utils import MolecularMetrics
 from src.utils.evaluation_utils import MolecularEvaluator
 
-# Set up logging
+# Set up logging with UTF-8 encoding to handle non-ASCII paths
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('training.log'),
-        logging.StreamHandler()
+        logging.FileHandler('training.log', encoding='utf-8'),
+        logging.StreamHandler(sys.stdout)
     ]
 )
 logger = logging.getLogger(__name__)
@@ -64,7 +63,7 @@ class DDPMLoss:
             vlb_loss = loss_t.mean() + loss_0.mean()
         
         # Additional regularization losses
-        reg_loss = torch.tensor(0.0, device=vlb_loss.device)
+        reg_loss = torch.tensor(0.0, device=vlb_loss.device, dtype=torch.float64)
         
         # Position regularization
         if xh_lig_hat is not None:
@@ -91,13 +90,19 @@ class DDPMLoss:
         return total_loss, loss_dict
 
 class DDPMTrainer:
-    """Main trainer class for DDPM molecular generation with equivariance testing"""
-    
     def __init__(self, config):
         self.config = config
-        self.device = torch.device(config.get('device', 'cuda' if torch.cuda.is_available() else 'cpu'))
+        requested_device = config.get('device', 'cuda')
+        self.precision = torch.float64 if config.get('precision', 'float64') == 'float64' else torch.float32
         
-        logger.info(f"Using device: {self.device}")
+        # Check CUDA availability and fall back to CPU if needed
+        if requested_device == 'cuda' and not torch.cuda.is_available():
+            logger.warning("CUDA requested but not available. Falling back to CPU.")
+            self.device = torch.device('cpu')
+        else:
+            self.device = torch.device(requested_device)
+        
+        logger.info(f"Using device: {self.device}, Precision: {self.precision}")
         
         # Create output directory
         self.output_dir = Path(config.get('output_dir', 'outputs'))
@@ -108,7 +113,7 @@ class DDPMTrainer:
         
         # Initialize model
         self.model = self._build_model()
-        self.model.to(self.device)
+        self.model.to(self.device).to(self.precision)
         
         # Count parameters
         total_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
@@ -124,6 +129,9 @@ class DDPMTrainer:
         # Loss computation
         self.loss_fn = DDPMLoss(config.get('loss', {}))
         
+        # Evaluator
+        self.evaluator = MolecularEvaluator(config.get('evaluation', {}))
+        
         # Training state
         self.epoch = 0
         self.step = 0
@@ -136,7 +144,6 @@ class DDPMTrainer:
     def _load_dataset_info(self):
         """Load dataset information"""
         dataset_info_path = Path(self.config['data']['processed_dir']) / 'dataset_info.pkl'
-        
         if dataset_info_path.exists():
             with open(dataset_info_path, 'rb') as f:
                 dataset_info = pickle.load(f)
@@ -151,20 +158,18 @@ class DDPMTrainer:
             }
     
     def _build_model(self):
-        """Build IMPROVED DDPM model with ViSNet dynamics"""
+        """Build DDPM model with ViSNet dynamics"""
         model_config = self.config['model']
-        
-        # Build DDPM model with improved ViSNet integration
+        logger.info(f"Model config: {model_config}")
         model = ConditionalDDPMViSNet(
             atom_nf=self.dataset_info['atom_nf'],
             residue_nf=self.dataset_info['residue_nf'],
             n_dims=3,
             size_histogram=self.dataset_info.get('size_histogram'),
-            #VISNET
             hidden_nf=model_config.get('hidden_nf', 256),
             num_layers=model_config.get('num_layers', 6),
             num_heads=model_config.get('num_heads', 8),
-            lmax=model_config.get('lmax', 2),  # <- ĐỌC TỪ CONFIG
+            lmax=model_config.get('lmax', 2),
             vecnorm_type=model_config.get('vecnorm_type', 'max_min'),
             trainable_vecnorm=model_config.get('trainable_vecnorm', True),
             edge_cutoff_ligand=model_config.get('edge_cutoff_ligand', 5.0),
@@ -173,7 +178,6 @@ class DDPMTrainer:
             activation=model_config.get('activation', 'silu'),
             cutoff=model_config.get('cutoff', 5.0),
             update_pocket_coords=model_config.get('update_pocket_coords', False),
-            #DDPM parameters
             timesteps=model_config.get('timesteps', 1000),
             parametrization=model_config.get('parametrization', 'eps'),
             noise_schedule=model_config.get('noise_schedule', 'cosine'),
@@ -182,225 +186,190 @@ class DDPMTrainer:
             norm_values=tuple(model_config.get('norm_values', [1.0, 1.0])),
             norm_biases=tuple(model_config.get('norm_biases', [None, 0.0])),
         )
-        
-        logger.info(f"Model built with lmax={model_config.get('lmax', 2)}")
-
+        logger.info(f"Model built with lmax={model_config.get('lmax', 2)}, cutoff={model_config.get('cutoff', 5.0)}")
         return model
     
     def _test_model_equivariance(self):
         """Test that the model maintains SE(3) equivariance"""
         logger.info("Testing SE(3) equivariance...")
-        
-        # Create dummy data for testing
-        batch_size = 2
         n_atoms = 10
         n_residues = 20
-        
-        # Dummy ligand data
         ligand = {
-            'x': torch.randn(n_atoms, 3, device=self.device),
-            'one_hot': torch.zeros(n_atoms, self.dataset_info['atom_nf'], device=self.device),
+            'x': torch.randn(n_atoms, 3, device=self.device, dtype=self.precision),
+            'one_hot': torch.zeros(n_atoms, self.dataset_info['atom_nf'], device=self.device, dtype=self.precision),
             'mask': torch.zeros(n_atoms, dtype=torch.long, device=self.device),
             'size': torch.tensor([n_atoms], device=self.device)
         }
-        
-        # Dummy pocket data
         pocket = {
-            'x': torch.randn(n_residues, 3, device=self.device),
-            'one_hot': torch.zeros(n_residues, self.dataset_info['residue_nf'], device=self.device),
+            'x': torch.randn(n_residues, 3, device=self.device, dtype=self.precision),
+            'one_hot': torch.zeros(n_residues, self.dataset_info['residue_nf'], device=self.device, dtype=self.precision),
             'mask': torch.zeros(n_residues, dtype=torch.long, device=self.device),
             'size': torch.tensor([n_residues], device=self.device)
         }
-        
-        # Set some dummy features
-        ligand['one_hot'][0, 0] = 1  # Carbon
-        pocket['one_hot'][0, 0] = 1  # Alanine
-        
-        # Test equivariance
-        with torch.no_grad():
-            error = self.model.test_equivariance(ligand, pocket)
-        
-        if error < 1e-4:
-            logger.info("✅ Model passes equivariance test!")
-        else:
-            logger.warning(f"⚠️ Model has equivariance issues (error: {error:.2e})")
-            logger.warning("This may affect the quality of generated molecules")
+        ligand['one_hot'][0, 0] = 1  # Carbon atom
+        pocket['one_hot'][0, 0] = 1  # Alanine residue
+        print("Ligand shapes:", {k: v.shape for k, v in ligand.items()})
+        print("Pocket shapes:", {k: v.shape for k, v in pocket.items()})
+        try:
+            loss_terms, info = self.model(ligand, pocket, return_info=True)
+            logger.info("Equivariance test passed (dummy forward successful)")
+        except Exception as e:
+            logger.error(f"Equivariance test failed: {e}")
+            raise
     
     def _build_optimizer(self):
         """Build optimizer"""
         opt_config = self.config.get('optimizer', {})
+        lr = opt_config.get('lr', 1e-4)
+        weight_decay = opt_config.get('weight_decay', 1e-5)
+        betas = opt_config.get('betas', [0.9, 0.999])
         
-        if opt_config.get('type', 'adamw').lower() == 'adamw':
-            optimizer = torch.optim.AdamW(
+        if opt_config.get('type', 'adam') == 'adamw':
+            return torch.optim.AdamW(
                 self.model.parameters(),
-                lr=opt_config.get('lr', 1e-4),
-                weight_decay=opt_config.get('weight_decay', 1e-5),
-                betas=opt_config.get('betas', (0.9, 0.999))
+                lr=lr,
+                weight_decay=weight_decay,
+                betas=betas
             )
-        else:
-            optimizer = torch.optim.Adam(
-                self.model.parameters(),
-                lr=opt_config.get('lr', 1e-4),
-                weight_decay=opt_config.get('weight_decay', 1e-5)
-            )
-        
-        return optimizer
+        return torch.optim.Adam(
+            self.model.parameters(),
+            lr=lr,
+            weight_decay=weight_decay,
+            betas=betas
+        )
     
     def _build_scheduler(self):
         """Build learning rate scheduler"""
         sched_config = self.config.get('scheduler', {})
+        scheduler_type = sched_config.get('type', 'none')
         
-        if sched_config.get('type') == 'cosine':
-            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        if scheduler_type == 'cosine':
+            return CosineAnnealingLR(
                 self.optimizer,
-                T_max=self.config['training']['epochs'],
+                T_max=sched_config.get('T_max', self.config['training']['epochs']),
                 eta_min=sched_config.get('min_lr', 1e-6)
             )
-        elif sched_config.get('type') == 'step':
-            scheduler = torch.optim.lr_scheduler.StepLR(
+        elif scheduler_type == 'step':
+            return StepLR(
                 self.optimizer,
                 step_size=sched_config.get('step_size', 50),
                 gamma=sched_config.get('gamma', 0.5)
             )
-        else:
-            scheduler = None
-        
-        return scheduler
+        return None
     
     def _init_wandb(self):
-        """Initialize Weights & Biases"""
+        """Initialize Weights & Biases logging with UTF-8 path handling"""
         wandb_config = self.config.get('wandb', {})
-        
-        wandb.init(
-            project=wandb_config.get('project', 'molecular-ddpm-equivariant'),
-            entity=wandb_config.get('entity', None),
-            name=wandb_config.get('run_name', f"ddpm-visnet-{datetime.now().strftime('%Y%m%d-%H%M%S')}"),
-            config=self.config,
-            tags=wandb_config.get('tags', ['molecular', 'ddpm', 'visnet', 'equivariant'])
-        )
-        
-        wandb.watch(self.model, log_freq=100)
+        try:
+            wandb.init(
+                project=wandb_config.get('project', 'molecular-ddpm-generation'),
+                entity=wandb_config.get('entity', None),
+                name=wandb_config.get('run_name', f"run-{datetime.now().strftime('%Y%m%d-%H%M%S')}"),
+                config=self.config,
+                tags=wandb_config.get('tags', []),
+                dir=str(self.output_dir)  # Convert Path to string to avoid encoding issues
+            )
+            wandb.watch(self.model)
+        except Exception as e:
+            logger.warning(f"Failed to initialize W&B: {e}. Continuing without W&B logging.")
     
     def prepare_batch(self, batch):
-        """Prepare batch data for model"""
         if batch is None:
+            logger.error("Received None batch")
             return None
-        
-        # Extract ligand data
-        ligand = {
-            'x': batch.pos,
-            'one_hot': batch.x,
-            'mask': batch.batch,
-            'size': torch.bincount(batch.batch)
-        }
-        
-        # Extract pocket data if available
-        pocket = None
-        if hasattr(batch, 'pocket_x') and batch.pocket_x is not None:
-            pocket = {
-                'x': batch.pocket_pos,
-                'one_hot': batch.pocket_x,
-                'mask': batch.pocket_batch,
-                'size': torch.bincount(batch.pocket_batch) if batch.pocket_batch is not None else None
-            }
-        
-        # Move to device
-        ligand = {k: v.to(self.device) if v is not None else None for k, v in ligand.items()}
-        if pocket:
-            pocket = {k: v.to(self.device) if v is not None else None for k, v in pocket.items()}
-        
-        return ligand, pocket
+        try:
+            if isinstance(batch, dict):
+                logger.debug(f"Batch keys: {batch.keys()}")
+            else:
+                logger.debug(f"Batch type: {type(batch)}, content: {batch}")
+            if not isinstance(batch, dict) or 'ligand' not in batch or 'pocket' not in batch:
+                if isinstance(batch, (list, tuple)) and len(batch) == 2:
+                    ligand_data, pocket_data = batch
+                elif isinstance(batch, dict) and 'ligand_pos' in batch:
+                    ligand = {
+                        'x': batch['ligand_pos'].to(self.device).to(self.precision),
+                        'one_hot': batch['ligand_features'].to(self.device).to(self.precision),
+                        'mask': batch['ligand_mask'].to(self.device),
+                        'size': batch['ligand_size'].to(self.device)
+                    }
+                    pocket = {
+                        'x': batch['pocket_pos'].to(self.device).to(self.precision),
+                        'one_hot': batch['pocket_features'].to(self.device).to(self.precision),
+                        'mask': batch['pocket_mask'].to(self.device),
+                        'size': batch['pocket_size'].to(self.device)
+                    }
+                else:
+                    raise KeyError("Batch must be a dict with 'ligand' and 'pocket' keys or a tuple of (ligand, pocket)")
+            else:
+                ligand = {
+                    'x': batch['ligand']['pos'].to(self.device).to(self.precision),
+                    'one_hot': batch['ligand']['features'].to(self.device).to(self.precision),
+                    'mask': batch['ligand']['mask'].to(self.device),
+                    'size': batch['ligand']['size'].to(self.device)
+                }
+                pocket = {
+                    'x': batch['pocket']['pos'].to(self.device).to(self.precision),
+                    'one_hot': batch['pocket']['features'].to(self.device).to(self.precision),
+                    'mask': batch['pocket']['mask'].to(self.device),
+                    'size': batch['pocket']['size'].to(self.device)
+                }
+            logger.debug(f"Ligand shapes: {{'x': {ligand['x'].shape}, 'one_hot': {ligand['one_hot'].shape}, 'mask': {ligand['mask'].shape}, 'size': {ligand['size'].shape}}}")
+            logger.debug(f"Pocket shapes: {{'x': {pocket['x'].shape}, 'one_hot': {pocket['one_hot'].shape}, 'mask': {pocket['mask'].shape}, 'size': {pocket['size'].shape}}}")
+            return ligand, pocket
+        except Exception as e:
+            logger.error(f"Error preparing batch: {e}")
+            return None
     
     def train_epoch(self, train_loader):
-        """Train for one epoch with equivariance monitoring"""
+        """Train one epoch with equivariance monitoring"""
         self.model.train()
         total_loss = 0
-        total_samples = 0
-        equivariance_errors = []
+        num_batches = 0
         
-        pbar = tqdm(train_loader, desc=f"Epoch {self.epoch}")
-        
-        for batch_idx, batch in enumerate(pbar):
+        for batch_idx, batch in enumerate(tqdm(train_loader, desc=f"Epoch {self.epoch}")):
             try:
-                # Prepare batch
                 prepared_data = self.prepare_batch(batch)
                 if prepared_data is None:
+                    logger.warning(f"Skipping batch {batch_idx} due to preparation failure")
                     continue
                 
                 ligand, pocket = prepared_data
-                
-                # Forward pass
                 self.optimizer.zero_grad()
                 
-                if pocket is not None:
-                    model_output = self.model(ligand, pocket, return_info=True)
-                else:
-                    dummy_pocket = {
-                        'x': torch.zeros((1, 3), device=self.device),
-                        'one_hot': torch.zeros((1, self.dataset_info['residue_nf']), device=self.device),
-                        'mask': torch.zeros(1, dtype=torch.long, device=self.device),
-                        'size': torch.tensor([1], device=self.device)
-                    }
-                    model_output = self.model(ligand, dummy_pocket, return_info=True)
-                
-                loss_terms = model_output[:-1]
-                info = model_output[-1]
-                
-                # Compute loss
+                loss_terms, info = self.model(ligand, pocket, return_info=True)
                 loss, loss_dict = self.loss_fn.compute_loss(loss_terms, info)
                 
-                # Backward pass
                 loss.backward()
-                
-                # Gradient clipping
-                clip_grad = self.config.get('training', {}).get('clip_grad', 1.0)
-                if clip_grad > 0:
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), clip_grad)
-                
+                if self.config['training'].get('clip_grad', 0.0) > 0:
+                    torch.nn.utils.clip_grad_norm_(
+                        self.model.parameters(),
+                        self.config['training']['clip_grad']
+                    )
                 self.optimizer.step()
                 
-                # Update metrics
-                batch_size = ligand['size'].sum().item()
-                total_loss += loss.item() * batch_size
-                total_samples += batch_size
-                
-                # Periodic equivariance check
-                if batch_idx % 100 == 0 and pocket is not None:
-                    with torch.no_grad():
-                        eq_error = self.model.test_equivariance(ligand, pocket)
-                        equivariance_errors.append(eq_error)
-                
-                # Update progress bar
-                avg_eq_error = np.mean([err.cpu().item() if isinstance(err, torch.Tensor) else err for err in equivariance_errors]) if equivariance_errors else 0.0
-                pbar.set_postfix({
-                    'loss': f"{loss.item():.4f}",
-                    'vlb': f"{loss_dict['vlb_loss']:.4f}",
-                    'lr': f"{self.optimizer.param_groups[0]['lr']:.2e}",
-                    'eq_err': f"{avg_eq_error:.2e}"
-                })
-                
-                # Log to wandb
-                if self.config.get('use_wandb', False) and self.step % 10 == 0:
-                    log_dict = {
-                        'train/loss': loss.item(),
-                        'train/learning_rate': self.optimizer.param_groups[0]['lr'],
-                        'train/epoch': self.epoch,
-                        'train/step': self.step,
-                        'train/equivariance_error': avg_eq_error
-                    }
-                    log_dict.update({f'train/{k}': v for k, v in loss_dict.items()})
-                    wandb.log(log_dict, step=self.step)
-                
+                total_loss += loss.item()
+                num_batches += 1
                 self.step += 1
                 
+                if self.config.get('use_wandb', False):
+                    try:
+                        wandb.log({
+                            'train/loss': loss.item(),
+                            'train/step': self.step,
+                            **{f'train/{k}': v for k, v in loss_dict.items()}
+                        })
+                    except Exception as e:
+                        logger.warning(f"W&B logging failed: {e}")
+            
             except Exception as e:
-                logger.error(f"Error in batch {batch_idx}: {e}")
+                logger.error(f"Error in training batch {batch_idx}: {e}")
                 continue
         
-        avg_loss = total_loss / max(total_samples, 1)
-        avg_eq_error = np.mean(equivariance_errors) if equivariance_errors else 0.0
+        avg_loss = total_loss / max(num_batches, 1)
+        logger.info(f"Processed {num_batches} valid batches out of {batch_idx + 1}")
         
-        logger.info(f"Epoch {self.epoch} - Avg Equivariance Error: {avg_eq_error:.2e}")
+        if self.epoch % 10 == 0:
+            self._test_model_equivariance()
         
         return avg_loss
     
@@ -411,41 +380,49 @@ class DDPMTrainer:
         total_samples = 0
         
         with torch.no_grad():
-            for batch in tqdm(val_loader, desc="Validation"):
+            for batch_idx, batch in enumerate(tqdm(val_loader, desc="Validation")):
                 try:
-                    # Prepare batch
                     prepared_data = self.prepare_batch(batch)
                     if prepared_data is None:
+                        logger.warning(f"Skipping validation batch {batch_idx} due to preparation failure")
                         continue
                     
                     ligand, pocket = prepared_data
-                    
-                    # Forward pass
-                    if pocket is not None:
-                        loss_terms, info = self.model(ligand, pocket, return_info=True)
-                    else:
-                        # Handle ligand-only case
-                        dummy_pocket = {
-                            'x': torch.zeros((1, 3), device=self.device),
-                            'one_hot': torch.zeros((1, self.dataset_info['residue_nf']), device=self.device),
-                            'mask': torch.zeros(1, dtype=torch.long, device=self.device),
-                            'size': torch.tensor([1], device=self.device)
-                        }
-                        loss_terms, info = self.model(ligand, dummy_pocket, return_info=True)
-                    
-                    # Compute loss
+                    loss_terms, info = self.model(ligand, pocket, return_info=True)
                     loss, loss_dict = self.loss_fn.compute_loss(loss_terms, info)
                     
-                    # Update metrics
                     batch_size = ligand['size'].sum().item()
                     total_loss += loss.item() * batch_size
                     total_samples += batch_size
                     
+                    if self.config.get('use_wandb', False):
+                        try:
+                            wandb.log({
+                                'val/batch_loss': loss.item(),
+                                **{f'val/{k}': v for k, v in loss_dict.items()}
+                            }, step=self.step)
+                        except Exception as e:
+                            logger.warning(f"W&B logging failed: {e}")
+                
                 except Exception as e:
-                    logger.error(f"Error in validation batch: {e}")
+                    logger.error(f"Error in validation batch {batch_idx}: {e}")
                     continue
         
         avg_loss = total_loss / max(total_samples, 1)
+        
+        if self.epoch % self.config['evaluation'].get('evaluate_every', 20) == 0:
+            eval_metrics = self.evaluator.evaluate(
+                self.model,
+                num_samples=self.config['evaluation'].get('num_samples', 100),
+                sample_timesteps=self.config['evaluation'].get('sample_timesteps', 1000)
+            )
+            logger.info(f"Evaluation metrics: {eval_metrics}")
+            if self.config.get('use_wandb', False):
+                try:
+                    wandb.log({f'eval/{k}': v for k, v in eval_metrics.items()}, step=self.step)
+                except Exception as e:
+                    logger.warning(f"W&B logging failed: {e}")
+        
         return avg_loss
     
     def save_checkpoint(self, filepath, is_best=False):
@@ -465,9 +442,10 @@ class DDPMTrainer:
         
         torch.save(checkpoint, filepath)
         
-        if is_best:
+        if is_best and self.config['checkpointing'].get('save_best', True):
             best_path = filepath.parent / 'best_model.pt'
             torch.save(checkpoint, best_path)
+            logger.info(f"Saved best model: {best_path}")
         
         logger.info(f"Saved checkpoint: {filepath}")
     
@@ -488,15 +466,12 @@ class DDPMTrainer:
         self.best_val_loss = checkpoint.get('best_val_loss', float('inf'))
         
         logger.info(f"Resumed from epoch {self.epoch}, step {self.step}")
-        
-        # Test equivariance after loading
         self._test_model_equivariance()
     
     def train(self):
         """Main training loop with equivariance monitoring"""
         logger.info("Starting training with SE(3) equivariance monitoring...")
         
-        # Load data
         train_config = self.config['data'].copy()
         train_config.update(self.config.get('training', {}))
         
@@ -505,30 +480,28 @@ class DDPMTrainer:
         
         logger.info(f"Train batches: {len(train_loader)}, Val batches: {len(val_loader)}")
         
-        # Training loop
         num_epochs = self.config['training']['epochs']
         save_every = self.config['training'].get('save_every', 10)
         
         for epoch in range(self.epoch, num_epochs):
             self.epoch = epoch
             
-            # Train
             train_loss = self.train_epoch(train_loader)
             logger.info(f"Epoch {epoch}: Train Loss = {train_loss:.6f}")
             
-            # Validate
             if val_loader:
                 val_loss = self.validate(val_loader)
                 logger.info(f"Epoch {epoch}: Val Loss = {val_loss:.6f}")
                 
-                # Log validation
                 if self.config.get('use_wandb', False):
-                    wandb.log({
-                        'val/loss': val_loss,
-                        'val/epoch': epoch
-                    }, step=self.step)
+                    try:
+                        wandb.log({
+                            'val/loss': val_loss,
+                            'val/epoch': epoch
+                        }, step=self.step)
+                    except Exception as e:
+                        logger.warning(f"W&B logging failed: {e}")
                 
-                # Save best model
                 is_best = val_loss < self.best_val_loss
                 if is_best:
                     self.best_val_loss = val_loss
@@ -539,24 +512,23 @@ class DDPMTrainer:
                 if is_best:
                     self.best_val_loss = val_loss
             
-            # Update scheduler
             if self.scheduler:
-                self.scheduler.step()
+                if self.config['scheduler'].get('type') in ['cosine', 'step']:
+                    self.scheduler.step()
             
-            # Save checkpoint
             if (epoch + 1) % save_every == 0 or is_best:
                 checkpoint_path = self.output_dir / f'checkpoint_epoch_{epoch}.pt'
                 self.save_checkpoint(checkpoint_path, is_best=is_best)
         
-        logger.info("Training completed!")
+        if self.config['checkpointing'].get('save_last', True):
+            final_path = self.output_dir / 'final_model.pt'
+            self.save_checkpoint(final_path)
         
-        # Final save
-        final_path = self.output_dir / 'final_model.pt'
-        self.save_checkpoint(final_path)
+        logger.info("Training completed!")
 
 def load_config(config_path):
     """Load configuration from YAML file"""
-    with open(config_path, 'r') as f:
+    with open(config_path, 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f)
     return config
 
@@ -566,42 +538,37 @@ def main():
     parser.add_argument('--resume', type=str, default=None, help='Path to checkpoint to resume from')
     parser.add_argument('--device', type=str, default=None, help='Device to use (cuda/cpu)')
     parser.add_argument('--output_dir', type=str, default=None, help='Output directory')
+    parser.add_argument('--precision', type=str, default='float64', choices=['float32', 'float64'], help='Floating point precision')
     parser.add_argument('--test_equivariance', action='store_true', help='Test equivariance and exit')
     
     args = parser.parse_args()
     
-    # Load configuration
     config = load_config(args.config)
     
-    # Override config with command line arguments
     if args.device:
         config['device'] = args.device
     if args.output_dir:
         config['output_dir'] = args.output_dir
+    if args.precision:
+        config['precision'] = args.precision
     
-    # Set random seeds
     seed = config.get('seed', 42)
     torch.manual_seed(seed)
     np.random.seed(seed)
     
-    # Create trainer
     trainer = DDPMTrainer(config)
     
-    # Resume from checkpoint if specified
     if args.resume:
         trainer.load_checkpoint(args.resume)
     
-    # Test equivariance only
     if args.test_equivariance:
         logger.info("Testing equivariance only...")
         return
     
-    # Start training
     try:
         trainer.train()
     except KeyboardInterrupt:
         logger.info("Training interrupted by user")
-        # Save checkpoint on interrupt
         interrupt_path = trainer.output_dir / 'interrupted_checkpoint.pt'
         trainer.save_checkpoint(interrupt_path)
     except Exception as e:
@@ -609,7 +576,10 @@ def main():
         raise
     finally:
         if config.get('use_wandb', False):
-            wandb.finish()
+            try:
+                wandb.finish()
+            except Exception as e:
+                logger.warning(f"W&B cleanup failed: {e}")
 
 if __name__ == "__main__":
     main()

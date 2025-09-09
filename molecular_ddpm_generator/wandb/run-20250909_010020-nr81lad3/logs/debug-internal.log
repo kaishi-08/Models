@@ -1,0 +1,7 @@
+{"time":"2025-09-09T01:00:20.5379567+07:00","level":"INFO","msg":"stream: starting","core version":"0.20.1","symlink path":"D:\\Học tập\\Lab314\\KhoaLuan\\MODELS\\Models\\molecular_ddpm_generator\\wandb\\run-20250909_010020-nr81lad3\\logs\\debug-core.log"}
+{"time":"2025-09-09T01:00:22.5065565+07:00","level":"INFO","msg":"stream: created new stream","id":"nr81lad3"}
+{"time":"2025-09-09T01:00:22.5065565+07:00","level":"INFO","msg":"stream: started","id":"nr81lad3"}
+{"time":"2025-09-09T01:00:22.5065565+07:00","level":"INFO","msg":"handler: started","stream_id":"nr81lad3"}
+{"time":"2025-09-09T01:00:22.5065565+07:00","level":"INFO","msg":"sender: started","stream_id":"nr81lad3"}
+{"time":"2025-09-09T01:00:22.5065565+07:00","level":"INFO","msg":"writer: Do: started","stream_id":"nr81lad3"}
+{"time":"2025-09-09T01:00:22.9882381+07:00","level":"INFO","msg":"Starting system monitor"}

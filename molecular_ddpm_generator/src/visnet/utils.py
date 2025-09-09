@@ -14,10 +14,11 @@ class CosineCutoff(nn.Module):
         super(CosineCutoff, self).__init__()
         
         self.cutoff = cutoff
-
+        self.to(torch.float64)  # Convert to float64
+        
     def forward(self, distances):
         cutoffs = 0.5 * (torch.cos(distances * math.pi / self.cutoff) + 1.0) #[0,1]
-        cutoffs = cutoffs * (distances < self.cutoff).float()
+        cutoffs = cutoffs * (distances < self.cutoff).to(cutoffs.dtype)
         return cutoffs # Dis_weight -> Reduce the influence of distant neightbors 
 
 
@@ -224,7 +225,7 @@ class Distance(nn.Module):
 
         if self.loop:
             mask = edge_index[0] != edge_index[1]
-            edge_weight = torch.zeros(edge_vec.size(0), device=edge_vec.device)
+            edge_weight = torch.zeros(edge_vec.size(0), device=edge_vec.device, dtype=torch.float64)
             edge_weight[mask] = torch.norm(edge_vec[mask], dim=-1)
         else:
             edge_weight = torch.norm(edge_vec, dim=-1)

@@ -1,0 +1,53 @@
+{
+  "os":  "Windows-10-10.0.26100-SP0",
+  "python":  "CPython 3.10.16",
+  "startedAt":  "2025-09-08T18:04:04.764380Z",
+  "args":  [
+    "--config",
+    "config/config.yaml",
+    "--device",
+    "cuda",
+    "--output_dir",
+    "outputs",
+    "--precision",
+    "float64"
+  ],
+  "program":  "D:\\Học tập\\Lab314\\KhoaLuan\\MODELS\\Models\\molecular_ddpm_generator\\train_model.py",
+  "codePath":  "molecular_ddpm_generator\\train_model.py",
+  "git":  {
+    "remote":  "https://github.com/kaishi-08/Models",
+    "commit":  "3cb0c809b700a2290640e1905d20ba960f8af682"
+  },
+  "email":  "lethang08082003@gmail.com",
+  "root":  "outputs",
+  "host":  "Kaishi",
+  "executable":  "C:\\Users\\admin\\anaconda3\\envs\\lab314\\python.exe",
+  "codePathLocal":  "train_model.py",
+  "cpu_count":  6,
+  "cpu_count_logical":  12,
+  "gpu":  "NVIDIA GeForce RTX 3050 Laptop GPU",
+  "gpu_count":  1,
+  "disk":  {
+    "/":  {
+      "total":  "270112124928",
+      "used":  "114380931072"
+    }
+  },
+  "memory":  {
+    "total":  "16931676160"
+  },
+  "cpu":  {
+    "count":  6,
+    "countLogical":  12
+  },
+  "gpu_nvidia":  [
+    {
+      "name":  "NVIDIA GeForce RTX 3050 Laptop GPU",
+      "memoryTotal":  "4294967296",
+      "cudaCores":  2048,
+      "architecture":  "Ampere",
+      "uuid":  "GPU-3019e2b6-1961-3dec-c4a7-7fbff9ac0527"
+    }
+  ],
+  "cudaVersion":  "12.5"
+}

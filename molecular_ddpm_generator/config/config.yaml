@@ -7,9 +7,9 @@ output_dir: 'outputs/ddpm_training'
 
 # Data configuration
 data:
-  processed_dir: 'data/processed_test'
-  train_path: 'data/processed_test/train.pkl'
-  test_path: 'data/processed_test/test.pkl'
+  processed_dir: 'data/processed'
+  train_path: 'data/processed/train.pkl'
+  test_path: 'data/processed/test.pkl'
   val_path: null  # Use test as validation if not specified
   
   batch_size: 8

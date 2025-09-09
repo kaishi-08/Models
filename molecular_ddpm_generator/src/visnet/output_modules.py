@@ -3,7 +3,7 @@ from abc import ABCMeta, abstractmethod
 import torch
 import torch.nn as nn
 
-from utils import act_class_mapping
+from src.visnet.utils import act_class_mapping
 
 
 class GatedEquivariantBlock(nn.Module):

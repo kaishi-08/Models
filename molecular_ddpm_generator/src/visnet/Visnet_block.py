@@ -379,9 +379,8 @@ class ViSNetBlock(nn.Module):
         self.distance = Distance(cutoff, max_num_neighbors=max_num_neighbors, loop=True)
         self.sphere = Sphere(l=lmax)
         self.distance_expansion = rbf_class_mapping[rbf_type](cutoff, num_rbf, trainable_rbf)
-        self.neighbor_embedding = NeighborEmbedding(hidden_channels, num_rbf, cutoff, input_dim).jittable()
-        self.edge_embedding = EdgeEmbedding(num_rbf, hidden_channels).jittable()
-
+        self.neighbor_embedding = NeighborEmbedding(hidden_channels, num_rbf, cutoff, input_dim)
+        self.edge_embedding = EdgeEmbedding(num_rbf, hidden_channels)
         self.vis_mp_layers = nn.ModuleList()
         vis_mp_kwargs = dict(
             num_heads=num_heads, 
@@ -394,12 +393,13 @@ class ViSNetBlock(nn.Module):
         )
         vis_mp_class = VIS_MP_MAP.get(vertex_type, ViS_MP)
         for _ in range(num_layers - 1):
-            layer = vis_mp_class(last_layer=False, **vis_mp_kwargs).jittable()
+            layer = vis_mp_class(last_layer=False, **vis_mp_kwargs)
             self.vis_mp_layers.append(layer)
-        self.vis_mp_layers.append(vis_mp_class(last_layer=True, **vis_mp_kwargs).jittable())
+        self.vis_mp_layers.append(vis_mp_class(last_layer=True, **vis_mp_kwargs))
 
         self.out_norm = nn.LayerNorm(hidden_channels)
         self.vec_out_norm = VecLayerNorm(hidden_channels, trainable=trainable_vecnorm, norm_type=vecnorm_type)
+        self.to(torch.float64)
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -424,7 +424,7 @@ class ViSNetBlock(nn.Module):
         edge_vec[mask] = edge_vec[mask] / torch.norm(edge_vec[mask], dim=1).unsqueeze(1)
         edge_vec = self.sphere(edge_vec)
         x = self.neighbor_embedding(x_onehot, x, edge_index, edge_weight, edge_attr)
-        vec = torch.zeros(x.size(0), ((self.lmax + 1) ** 2) - 1, x.size(1), device=x.device)
+        vec = torch.zeros(x.size(0), ((self.lmax + 1) ** 2) - 1, x.size(1), device=x.device, dtype=torch.float64)
         edge_attr = self.edge_embedding(edge_index, edge_attr, x)
         
         # ViS-MP Layers

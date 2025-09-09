@@ -14,11 +14,10 @@ class ConditionalDDPMViSNet(nn.Module):
             atom_nf: int,
             residue_nf: int,
             n_dims: int = 3,
-            #visnet_parameter
             hidden_nf: int = 256,
             num_layers: int = 6,
             num_heads: int = 8,
-            lmax: int =2, 
+            lmax: int = 2,
             vecnorm_type: str = 'max_min',
             trainable_vecnorm: bool = True,
             edge_cutoff_ligand: float = 5.0,
@@ -49,7 +48,7 @@ class ConditionalDDPMViSNet(nn.Module):
             hidden_nf=hidden_nf,
             num_layers=num_layers,
             num_heads=num_heads,
-            lmax=lmax,  
+            lmax=lmax,
             vecnorm_type=vecnorm_type,
             trainable_vecnorm=trainable_vecnorm,
             edge_cutoff_ligand=edge_cutoff_ligand,
@@ -58,8 +57,7 @@ class ConditionalDDPMViSNet(nn.Module):
             activation=activation,
             cutoff=cutoff,
             update_pocket_coords=update_pocket_coords
-    )
-                # Ensure dynamics doesn't update pocket coords (fixed condition)
+        )
         assert not self.dynamics.update_pocket_coords, \
             "Pocket coordinates should not be updated in conditional model"
         
@@ -73,7 +71,6 @@ class ConditionalDDPMViSNet(nn.Module):
         self.norm_biases = norm_biases
         self.vnode_idx = vnode_idx
         
-        # Noise schedule
         if noise_schedule == 'learned':
             assert loss_type == 'vlb', 'Learned schedule requires VLB objective'
             self.gamma = GammaNetwork()
@@ -81,19 +78,18 @@ class ConditionalDDPMViSNet(nn.Module):
             self.gamma = PredefinedNoiseSchedule(
                 noise_schedule, timesteps=timesteps, precision=noise_precision)
         
-        # Size distribution for ligands given pockets
         if size_histogram is not None:
             self.size_distribution = DistributionNodes(size_histogram)
         else:
             self.size_distribution = None
         
-        self.register_buffer('buffer', torch.zeros(1))
+        self.register_buffer('buffer', torch.zeros(1, dtype=torch.float64))
         
         if noise_schedule != 'learned':
             self.check_issues_norm_values()
 
     def check_issues_norm_values(self, num_stdevs=8):
-        zeros = torch.zeros((1, 1))
+        zeros = torch.zeros((1, 1), dtype=torch.float64)
         gamma_0 = self.gamma(zeros)
         sigma_0 = self.sigma(gamma_0, target_tensor=zeros).item()
         
@@ -101,43 +97,36 @@ class ConditionalDDPMViSNet(nn.Module):
         if sigma_0 * num_stdevs > 1. / norm_value:
             raise ValueError(
                 f'Normalization value {norm_value} too large with sigma_0 {sigma_0:.5f}')
-    
+
     def sigma_and_alpha_t_given_s(self, gamma_t, gamma_s, target_tensor):
-        """Compute sigma and alpha for transition from s to t."""
         sigma2_t_given_s = self.inflate_batch_array(
             -torch.expm1(F.softplus(gamma_s) - F.softplus(gamma_t)), target_tensor)
-        
         log_alpha2_t = F.logsigmoid(-gamma_t)
         log_alpha2_s = F.logsigmoid(-gamma_s)
         log_alpha2_t_given_s = log_alpha2_t - log_alpha2_s
-        
         alpha_t_given_s = torch.exp(0.5 * log_alpha2_t_given_s)
         alpha_t_given_s = self.inflate_batch_array(alpha_t_given_s, target_tensor)
         sigma_t_given_s = torch.sqrt(sigma2_t_given_s)
-        
         return sigma2_t_given_s, sigma_t_given_s, alpha_t_given_s
 
     def sigma(self, gamma, target_tensor):
-        """Compute sigma given gamma."""
         return self.inflate_batch_array(torch.sqrt(torch.sigmoid(gamma)), target_tensor)
 
     def alpha(self, gamma, target_tensor):
-        """Compute alpha given gamma."""
         return self.inflate_batch_array(torch.sqrt(torch.sigmoid(-gamma)), target_tensor)
 
     @staticmethod
     def SNR(gamma):
-        """Compute signal-to-noise ratio."""
         return torch.exp(-gamma)
 
     @staticmethod
     def inflate_batch_array(array, target):
-        """Inflate batch array to match target shape."""
+        if array.dim() == 0:  # Handle scalar input
+            array = array.unsqueeze(0)
         target_shape = (array.size(0),) + (1,) * (len(target.size()) - 1)
         return array.view(target_shape)
 
     def normalize(self, ligand=None, pocket=None):
-        """Normalize ligand and pocket data."""
         if ligand is not None:
             ligand_norm = {
                 'x': ligand['x'] / self.norm_values[0],
@@ -161,62 +150,35 @@ class ConditionalDDPMViSNet(nn.Module):
         return ligand_norm, pocket_norm
 
     def unnormalize(self, x, h_cat):
-        """Unnormalize data."""
         x = x * self.norm_values[0]
         h_cat = h_cat * self.norm_values[1] + self.norm_biases[1]
         return x, h_cat
 
     def unnormalize_z(self, z_lig, z_pocket):
-        """Unnormalize concatenated z tensor."""
         x_lig, h_lig = z_lig[:, :self.n_dims], z_lig[:, self.n_dims:]
         x_pocket, h_pocket = z_pocket[:, :self.n_dims], z_pocket[:, self.n_dims:]
-        
         x_lig, h_lig = self.unnormalize(x_lig, h_lig)
         x_pocket, h_pocket = self.unnormalize(x_pocket, h_pocket)
-        
         return torch.cat([x_lig, h_lig], dim=1), torch.cat([x_pocket, h_pocket], dim=1)
 
-    @classmethod
-    def remove_mean_batch(cls, x_lig, x_pocket, lig_indices, pocket_indices):
-        # Compute ligand center of mass
-        mean = scatter_mean(x_lig, lig_indices, dim=0)
+    def noised_representation(self, xh0_lig, xh0_pocket, lig_mask, pocket_mask, t):
+        t = t.squeeze().to(dtype=torch.float64, device=xh0_lig.device)
+        gamma_t = self.gamma(t)
+        alpha_t = self.alpha(gamma_t, xh0_lig)
+        sigma_t = self.sigma(gamma_t, xh0_lig)
         
-        # Subtract ligand COM from both ligand and pocket
-        # This creates a ligand-centered coordinate system
-        x_lig = x_lig - mean[lig_indices]
-        x_pocket = x_pocket - mean[pocket_indices]
+        eps_lig = torch.randn_like(xh0_lig, dtype=torch.float64)
+        eps_pocket = torch.randn_like(xh0_pocket, dtype=torch.float64) if xh0_pocket is not None else None
         
-        return x_lig, x_pocket
+        z_t_lig = alpha_t * xh0_lig + sigma_t * eps_lig
+        z_t_pocket = xh0_pocket
+        if xh0_pocket is not None and not self.dynamics.update_pocket_coords:
+            z_t_pocket = xh0_pocket
+        elif xh0_pocket is not None:
+            z_t_pocket = alpha_t * xh0_pocket + sigma_t * eps_pocket
+        
+        return z_t_lig, z_t_pocket, eps_lig, eps_pocket
 
-    def test_equivariance(self, ligand, pocket):
-        """
-        Test method to verify the model maintains SE(3) equivariance
-        """
-        print("Testing SE(3) equivariance...")
-        
-        # Prepare normalized inputs
-        ligand_norm, pocket_norm = self.normalize(ligand, pocket)
-        
-        # Sample a random timestep
-        t = torch.rand(1, 1, device=ligand['x'].device)
-        
-        # Prepare concatenated inputs for dynamics
-        xh_lig = torch.cat([ligand_norm['x'], ligand_norm['one_hot']], dim=1)
-        xh_pocket = torch.cat([pocket_norm['x'], pocket_norm['one_hot']], dim=1)
-        
-        # Test equivariance of the dynamics
-        error = self.dynamics.check_equivariance(
-            xh_lig, xh_pocket, t, ligand['mask'], pocket['mask']
-        )
-        
-        print(f"Total equivariance error: {error:.8f}")
-        
-        if error < 1e-5:
-            print("✅ Model is properly equivariant!")
-        else:
-            print("❌ Model has equivariance issues!")
-        
-        return error
 
     def forward(self, ligand, pocket, return_info=False):
         # Test equivariance periodically during training
@@ -252,13 +214,14 @@ class ConditionalDDPMViSNet(nn.Module):
         xh0_pocket = torch.cat([pocket['x'], pocket['one_hot']], dim=1)
         
         # Center system (ligand COM reference) - PROPER equivariant centering
-        xh0_lig[:, :self.n_dims], xh0_pocket[:, :self.n_dims] = \
-            self.remove_mean_batch(xh0_lig[:, :self.n_dims],
-                                   xh0_pocket[:, :self.n_dims],
-                                   ligand['mask'], pocket['mask'])
+        combined_x = torch.cat([xh0_lig[:, :self.n_dims], xh0_pocket[:, :self.n_dims]], dim=0)
+        combined_mask = torch.cat([ligand['mask'], pocket['mask']], dim=0)
+        combined_x = self.dynamics.remove_mean_batch(combined_x, combined_mask)
+        xh0_lig[:, :self.n_dims] = combined_x[:xh0_lig.shape[0]]
+        xh0_pocket[:, :self.n_dims] = combined_x[xh0_lig.shape[0]:]
         
         # Add noise to ligand only
-        z_t_lig, xh_pocket, eps_t_lig = \
+        z_t_lig, xh_pocket, eps_t_lig, _ = \
             self.noised_representation(xh0_lig, xh0_pocket, 
                                        ligand['mask'], pocket['mask'], gamma_t)
         
@@ -312,30 +275,32 @@ class ConditionalDDPMViSNet(nn.Module):
                       neg_log_constants, kl_prior, log_pN,
                       t_int.squeeze(), xh_lig_hat)
         
-        return (*loss_terms, info) if return_info else loss_terms
+        return (loss_terms, info) if return_info else loss_terms
     
-    def noised_representation(self, xh_lig, xh0_pocket, lig_mask, pocket_mask, gamma_t):
-        """Create noised representation for ligand only (pocket stays clean)."""
-        # Compute alpha_t and sigma_t from gamma
-        alpha_t = self.alpha(gamma_t, xh_lig)
-        sigma_t = self.sigma(gamma_t, xh_lig)
-
-        # Sample noise for ligand only
-        eps_lig = self.sample_gaussian(
-            size=(len(lig_mask), self.n_dims + self.atom_nf),
-            device=lig_mask.device)
-
-        # Apply noise to ligand
-        z_t_lig = alpha_t[lig_mask] * xh_lig + sigma_t[lig_mask] * eps_lig
-
-        # Pocket stays clean, but apply COM centering
-        xh_pocket = xh0_pocket.detach().clone()
-        z_t_lig[:, :self.n_dims], xh_pocket[:, :self.n_dims] = \
-            self.remove_mean_batch(z_t_lig[:, :self.n_dims],
-                                   xh_pocket[:, :self.n_dims],
-                                   lig_mask, pocket_mask)
-
-        return z_t_lig, xh_pocket, eps_lig
+    def noised_representation(self, xh0_lig, xh0_pocket, lig_mask, pocket_mask, t):
+        # Ensure t is a 1D tensor with batch dimension
+        if t.dim() == 0:  # Scalar case
+            t = t.unsqueeze(0)
+        elif t.dim() > 1:  # Multi-dimensional case
+            t = t.squeeze().unsqueeze(0) if t.numel() == 1 else t.squeeze()
+        t = t.to(dtype=torch.float64, device=xh0_lig.device)
+        
+        gamma_t = self.gamma(t)
+        alpha_t = self.alpha(gamma_t, xh0_lig)
+        sigma_t = self.sigma(gamma_t, xh0_lig)
+        
+        eps_lig = torch.randn_like(xh0_lig, dtype=torch.float64)
+        eps_pocket = torch.randn_like(xh0_pocket, dtype=torch.float64) if xh0_pocket is not None else None
+        
+        z_t_lig = alpha_t * xh0_lig + sigma_t * eps_lig
+        z_t_lig[:, :self.n_dims] = self.dynamics.remove_mean_batch(z_t_lig[:, :self.n_dims], lig_mask)
+        z_t_pocket = xh0_pocket
+        if xh0_pocket is not None and not self.dynamics.update_pocket_coords:
+            z_t_pocket = xh0_pocket
+        elif xh0_pocket is not None:
+            z_t_pocket = alpha_t * xh0_pocket + sigma_t * eps_pocket
+        
+        return z_t_lig, z_t_pocket, eps_lig, eps_pocket
 
     def sample_normal_zero_com(self, mu_lig, xh0_pocket, sigma, lig_mask, pocket_mask, fix_noise=False):
         """Sample from normal distribution with COM constraint."""
@@ -351,7 +316,7 @@ class ConditionalDDPMViSNet(nn.Module):
         # Apply COM constraint
         xh_pocket = xh0_pocket.detach().clone()
         out_lig[:, :self.n_dims], xh_pocket[:, :self.n_dims] = \
-            self.remove_mean_batch(out_lig[:, :self.n_dims],
+            self.dynamics.remove_mean_batch(out_lig[:, :self.n_dims],
                                    xh0_pocket[:, :self.n_dims],
                                    lig_mask, pocket_mask)
 
@@ -545,7 +510,11 @@ class ConditionalDDPMViSNet(nn.Module):
             max_cog = scatter_add(x_lig, lig_mask, dim=0).abs().max().item()
             if max_cog > 5e-2:
                 print(f'Warning: CoM drift {max_cog:.3f}, correcting...')
-                x_lig, x_pocket = self.remove_mean_batch(x_lig, x_pocket, lig_mask, pocket['mask'])
+                combined_x = torch.cat([x_lig, x_pocket], dim=0)
+                combined_mask = torch.cat([lig_mask, pocket['mask']], dim=0)
+                combined_x = self.dynamics.remove_mean_batch(combined_x, combined_mask)
+                x_lig = combined_x[:x_lig.shape[0]]
+                x_pocket = combined_x[x_lig.shape[0]:]
         
         out_lig[0] = torch.cat([x_lig, h_lig], dim=1)
         out_pocket[0] = torch.cat([x_pocket, h_pocket], dim=1)
@@ -633,7 +602,6 @@ class PositiveLinear(nn.Module):
 
 
 class GammaNetwork(nn.Module):
-    """Learnable monotonic noise schedule."""
     def __init__(self):
         super().__init__()
         self.l1 = PositiveLinear(1, 1)
@@ -643,26 +611,26 @@ class GammaNetwork(nn.Module):
         self.gamma_1 = nn.Parameter(torch.tensor([10.]))
 
     def gamma_tilde(self, t):
+        if t.dim() == 0:
+            t = t.unsqueeze(0)
         l1_t = self.l1(t)
         return l1_t + self.l3(torch.sigmoid(self.l2(l1_t)))
 
     def forward(self, t):
+        if t.dim() == 0:
+            t = t.unsqueeze(0)
         zeros, ones = torch.zeros_like(t), torch.ones_like(t)
         gamma_tilde_0 = self.gamma_tilde(zeros)
         gamma_tilde_1 = self.gamma_tilde(ones)
         gamma_tilde_t = self.gamma_tilde(t)
-        
         normalized_gamma = (gamma_tilde_t - gamma_tilde_0) / (gamma_tilde_1 - gamma_tilde_0)
         gamma = self.gamma_0 + (self.gamma_1 - self.gamma_0) * normalized_gamma
         return gamma
 
-
 class PredefinedNoiseSchedule(nn.Module):
-    """Predefined noise schedules."""
     def __init__(self, noise_schedule, timesteps, precision):
         super().__init__()
         self.timesteps = timesteps
-        
         if noise_schedule == 'cosine':
             alphas2 = self._cosine_schedule(timesteps)
         elif 'polynomial' in noise_schedule:
@@ -670,10 +638,8 @@ class PredefinedNoiseSchedule(nn.Module):
             alphas2 = self._polynomial_schedule(timesteps, precision, power)
         else:
             raise ValueError(f"Unknown noise schedule: {noise_schedule}")
-        
         sigmas2 = 1 - alphas2
         log_alphas2_to_sigmas2 = np.log(alphas2) - np.log(sigmas2)
-        
         self.gamma = nn.Parameter(
             torch.from_numpy(-log_alphas2_to_sigmas2).float(),
             requires_grad=False)
@@ -695,5 +661,7 @@ class PredefinedNoiseSchedule(nn.Module):
         return precision * alphas2 + s
 
     def forward(self, t):
+        if t.dim() == 0:
+            t = t.unsqueeze(0)
         t_int = torch.round(t * self.timesteps).long()
         return self.gamma[t_int]

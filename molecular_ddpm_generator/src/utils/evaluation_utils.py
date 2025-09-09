@@ -6,34 +6,22 @@ from rdkit.Chem import AllChem, DataStructs, Descriptors
 from scipy.spatial.distance import pdist, squareform
 
 class MolecularEvaluator:
-    """Comprehensive molecular evaluation utilities"""
+    def __init__(self, config=None):
+        self.config = config or {}
+        self.evaluate_every = self.config.get('evaluate_every', 20)
+        self.num_samples = self.config.get('num_samples', 100)
+        self.sample_timesteps = self.config.get('sample_timesteps', 1000)
     
-    @staticmethod
-    def compute_diversity(smiles_list: List[str], metric: str = 'tanimoto') -> float:
-        """Compute molecular diversity"""
-        valid_mols = []
-        for smiles in smiles_list:
-            if smiles:
-                mol = Chem.MolFromSmiles(smiles)
-                if mol is not None:
-                    valid_mols.append(mol)
-        
-        if len(valid_mols) < 2:
-            return 0.0
-        
-        if metric == 'tanimoto':
-            fps = [AllChem.GetMorganFingerprintAsBitVect(mol, 2) for mol in valid_mols]
-            similarities = []
-            
-            for i in range(len(fps)):
-                for j in range(i + 1, len(fps)):
-                    sim = DataStructs.TanimotoSimilarity(fps[i], fps[j])
-                    similarities.append(sim)
-            
-            diversity = 1 - np.mean(similarities)
-            return diversity
-        
-        return 0.0
+    def evaluate(self, model, num_samples=None, sample_timesteps=None):
+        # Use config values if not provided
+        num_samples = num_samples if num_samples is not None else self.num_samples
+        sample_timesteps = sample_timesteps if sample_timesteps is not None else self.sample_timesteps
+        # Placeholder for evaluation logic
+        # Replace with actual evaluation code (e.g., sampling molecules, computing metrics)
+        metrics = {
+            'dummy_metric': 0.0  # Replace with actual metrics
+        }
+        return metrics
     
     @staticmethod
     def compute_fcd(generated_smiles: List[str], reference_smiles: List[str]) -> float:
