@@ -6,7 +6,7 @@ from torch import nn
 from torch_scatter import scatter_add, scatter_mean
 
 from .vis_dynamics import ViSNetDynamics
-from ..utils import molecular_utils
+from ..utils import utils
 
 class ConditionalDDPMViSNet(nn.Module):
     def __init__(
@@ -489,7 +489,7 @@ class ConditionalDDPMViSNet(nn.Module):
         _, pocket = self.normalize(pocket=pocket)
         xh0_pocket = torch.cat([pocket['x'], pocket['one_hot']], dim=1)
         
-        lig_mask = molecular_utils.num_nodes_to_batch_mask(n_samples, num_nodes_lig, device)
+        lig_mask = utils.num_nodes_to_batch_mask(n_samples, num_nodes_lig, device)
         
         # Initialize ligand at pocket center
         mu_lig_x = scatter_mean(pocket['x'], pocket['mask'], dim=0)
