@@ -5,7 +5,7 @@ import torch
 import numpy as np
 from rdkit import Chem
 from rdkit.Chem.rdForceFieldHelpers import UFFOptimizeMolecule, UFFHasAllMoleculeParams
-import openbabel
+from openbabel import openbabel
 
 import src.utils.utils as utils
 from src.utils.constants import bonds1, bonds2, bonds3, margin1, margin2, margin3, \
@@ -70,20 +70,24 @@ def make_mol_openbabel(positions, atom_types, atom_decoder):
     with tempfile.NamedTemporaryFile() as tmp:
         tmp_file = tmp.name
 
-        # Write xyz file
-        utils.write_xyz_file(positions, atom_types, tmp_file)
+        try:
+            # Write xyz file
+            utils.write_xyz_file(positions, atom_types, tmp_file)
 
-        # Convert to sdf file with openbabel
-        # openbabel will add bonds
-        obConversion = openbabel.OBConversion()
-        obConversion.SetInAndOutFormats("xyz", "sdf")
-        ob_mol = openbabel.OBMol()
-        obConversion.ReadFile(ob_mol, tmp_file)
+            # Convert to sdf file with openbabel
+            # openbabel will add bonds
+            obConversion = openbabel.OBConversion()
+            obConversion.SetInAndOutFormats("xyz", "sdf")
+            ob_mol = openbabel.OBMol()
+            obConversion.ReadFile(ob_mol, tmp_file)
 
-        obConversion.WriteFile(ob_mol, tmp_file)
+            obConversion.WriteFile(ob_mol, tmp_file)
 
-        # Read sdf file with RDKit
-        tmp_mol = Chem.SDMolSupplier(tmp_file, sanitize=False)[0]
+            # Read sdf file with RDKit
+            tmp_mol = Chem.SDMolSupplier(tmp_file, sanitize=False)[0]
+        except Exception as e:
+            raise RuntimeError(
+                f'Fail to construct molecular from {tmp_file}: {e}')
 
     # Build new molecule. This is a workaround to remove radicals.
     mol = Chem.RWMol()
@@ -94,8 +98,9 @@ def make_mol_openbabel(positions, atom_types, atom_decoder):
     for bond in tmp_mol.GetBonds():
         mol.AddBond(bond.GetBeginAtomIdx(), bond.GetEndAtomIdx(),
                     bond.GetBondType())
-
+        
     return mol
+
 
 
 def make_mol_edm(positions, atom_types, dataset_info, add_coords):
