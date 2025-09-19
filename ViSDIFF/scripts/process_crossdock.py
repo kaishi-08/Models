@@ -32,21 +32,14 @@ from src.utils.constants import covalent_radii, dataset_params
 def process_ligand_and_pocket(pdbfile, sdffile,
                               atom_dict, dist_cutoff, ca_only):
     pdb_struct = PDBParser(QUIET=True).get_structure('', pdbfile)
-    try:
-        pdb_struct = PDBParser(QUIET=True).get_structure('', pdbfile)
-        if not pdb_struct.get_chains():
-            return None
-    except Exception:
-        return None
     
     try:
         ligand = Chem.SDMolSupplier(str(sdffile))[0]
-        if ligand is None:
+        #if ligand is None:
             #raise Exception(f'No valid molecule found in SDF file ({sdffile})')
-            return None
+            #return None
     except:
-        #raise Exception(f'cannot read sdf mol ({sdffile})')
-        return None
+        raise Exception(f'cannot read sdf mol ({sdffile})')
 
     # remove H atoms if not in atom_dict, other atom types that aren't allowed
     # should stay so that the entire ligand can be removed from the dataset
@@ -61,7 +54,8 @@ def process_ligand_and_pocket(pdbfile, sdffile,
             for a in lig_atoms
         ])
     except KeyError as e:
-        return None
+        raise KeyError(
+            f'{e} not in atom dict ({sdffile})')
 
     # Find interacting pocket residues based on distance cutoff
     pocket_residues = []
@@ -71,9 +65,6 @@ def process_ligand_and_pocket(pdbfile, sdffile,
                 (((res_coords[:, None, :] - lig_coords[None, :, :]) ** 2).sum(
                     -1) ** 0.5).min() < dist_cutoff:
             pocket_residues.append(residue)
-    
-    if not pocket_residues:
-        return None
 
     pocket_ids = [f'{res.parent.id}:{res.id[1]}' for res in pocket_residues]
     ligand_data = {
@@ -93,7 +84,13 @@ def process_ligand_and_pocket(pdbfile, sdffile,
             pocket_one_hot = np.stack(pocket_one_hot)
             full_coords = np.stack(full_coords)
         except KeyError as e:
-            return None
+            raise KeyError(
+                f'{e} not in amino acid dict ({pdbfile}, {sdffile})')
+        pocket_data = {
+            'pocket_coords': full_coords,
+            'pocket_one_hot': pocket_one_hot,
+            'pocket_ids': pocket_ids
+        }
     else:
         full_atoms = np.concatenate(
             [np.array([atom.element for atom in res.get_atoms()])
@@ -113,7 +110,9 @@ def process_ligand_and_pocket(pdbfile, sdffile,
                 pocket_one_hot.append(atom)
             pocket_one_hot = np.stack(pocket_one_hot)
         except KeyError as e:
-            return None
+            raise KeyError(
+                f'{e} not in atom dict({pdbfile})')
+        
         pocket_data = {
             'pocket_coords': full_coords,
             'pocket_one_hot': pocket_one_hot,
@@ -136,17 +135,17 @@ def compute_smiles(positions, one_hot, mask):
     pbar = tqdm(enumerate(zip(positions, atom_types)),
                 total=len(np.unique(mask)))
     for i, (pos, atom_type) in pbar:
+        mol = build_molecule(pos, atom_type, dataset_info)
+
         try:
-            mol = build_molecule(pos, atom_type, dataset_info)
-            if mol is None:
-                continue
             Chem.SanitizeMol(mol)
-            mol_smiles = rdmol_to_smiles(mol)
-            if mol_smiles is not None:
-                mols_smiles.append(mol_smiles)
-        except Exception:
+        except ValueError:
             continue
-        pbar.set_description(f'{len(mols_smiles)}/{i + 1} successful')
+
+        mol = rdmol_to_smiles(mol)
+        if mol is not None:
+            mols_smiles.append(mol)
+        pbar.set_description(f'{len(mols_smiles)}/{i+1} successful')
 
     return mols_smiles
 
@@ -296,7 +295,7 @@ def create_train_test_splits(datadir, random_seed, max_samples = 1000):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--data_dir', type=Path)
+    parser.add_argument('basedir', type=Path)
     parser.add_argument('--outdir', type=Path, default=None)
     parser.add_argument('--no_H', action='store_true')
     parser.add_argument('--ca_only', action='store_true')
@@ -304,7 +303,7 @@ if __name__ == '__main__':
     parser.add_argument('--random_seed', type=int, default=42)
     args = parser.parse_args()
 
-    datadir = args.data_dir 
+    datadir = args.basedir / 'crossdocked_pocket10/' 
 
     if args.ca_only:
         dataset_info = dataset_params['crossdock']
@@ -318,27 +317,31 @@ if __name__ == '__main__':
     if args.outdir is None:
         suffix = '_crossdock' if 'H' in atom_dict else '_crossdock_noH'
         suffix += '_ca_only_temp' if args.ca_only else '_full_temp'
-        processed_dir = Path(args.data_dir, f'processed{suffix}')
+        processed_dir = Path(args.basedir, f'processed{suffix}')
     else:
         processed_dir = args.outdir
 
     processed_dir.mkdir(exist_ok=True, parents=True)
 
     # Read data split
-    split_path = Path(args.data_dir, 'split_80_10_10.pt')
+    split_path = Path(args.basedir, 'split_by_name.pt')
     if split_path.exists():
         print("Loading existing split...")
         data_split = torch.load(split_path)
+
+    # There is no validation set, copy 300 training examples (the validation set
+    # is not very important in this application)
+    # Note: before we had a data leak but it should not matter too much as most
+    # metrics monitored during training are independent of the pockets
+        data_split['val'] = random.sample(data_split['train'], 300)
+    
     else:
         print("Creating new 80:10:10 split...")
         data_split = create_train_test_splits(datadir, args.random_seed, max_samples=1000)
         if data_split is None:
             raise ValueError("Failed to create split!")
 
-    # There is no validation set, copy 300 training examples (the validation set
-    # is not very important in this application)
-    # Note: before we had a data leak but it should not matter too much as most
-    # metrics monitored during training are independent of the pockets
+
     n_train_before = len(data_split['train'])
     n_val_before = len(data_split['val'])
     n_test_before = len(data_split['test'])
@@ -366,15 +369,8 @@ if __name__ == '__main__':
         num_failed = 0
         pbar = tqdm(data_split[split])
         pbar.set_description(f'#failed: {num_failed}')
-        for entry in pbar:
-            if not isinstance(entry, (list, tuple)) or len(entry) < 2:
-                #print(f"Invalid entry in index.pkl: {entry}")
-                num_failed += 1
-                failed_save.append(entry)
-                pbar.set_description(f'#failed: {num_failed}')
-                continue
-
-            pocket_fn, ligand_fn = entry[0], entry[1]
+        for pocket_fn, ligand_fn in pbar:
+            
             sdffile = datadir / f'{ligand_fn}'
             pdbfile = datadir / f'{pocket_fn}'
 
@@ -383,22 +379,21 @@ if __name__ == '__main__':
             except:
                 num_failed += 1
                 failed_save.append((pocket_fn, ligand_fn))
-                #print(failed_save[-1])
+                print(failed_save[-1])
                 pbar.set_description(f'#failed: {num_failed}')
                 continue
-
             
-            result = process_ligand_and_pocket(
+            try:
+                ligand_data, pocket_data = process_ligand_and_pocket(
                 pdbfile, sdffile,
                 atom_dict=atom_dict, dist_cutoff=args.dist_cutoff,
                 ca_only=args.ca_only)
-            
-            if result is None:
+
+            except(KeyError, AssertionError, FileNotFoundError, IndexError, ValueError) as e:
+                print(type(e).__name__, e, pocket_fn, ligand_fn)
                 num_failed += 1
-                failed_save.append((pocket_fn, ligand_fn))
                 pbar.set_description(f'#failed: {num_failed}')
                 continue
-            ligand_data, pocket_data = result
 
             pdb_and_mol_ids.append(f"{pocket_fn}_{ligand_fn}")
             lig_coords.append(ligand_data['lig_coords'])

@@ -65,40 +65,37 @@ def make_mol_openbabel(positions, atom_types, atom_decoder):
     Returns:
         rdkit molecule
     """
-    try:
-        atom_types = [atom_decoder[x] for x in atom_types]
+    atom_types = [atom_decoder[x] for x in atom_types]
 
-        with tempfile.NamedTemporaryFile() as tmp:
-            tmp_file = tmp.name
+    with tempfile.NamedTemporaryFile() as tmp:
+        tmp_file = tmp.name
 
-            # Write xyz file
-            utils.write_xyz_file(positions, atom_types, tmp_file)
+        # Write xyz file
+        utils.write_xyz_file(positions, atom_types, tmp_file)
 
-            # Convert to sdf file with openbabel
-            # openbabel will add bonds
-            obConversion = openbabel.OBConversion()
-            obConversion.SetInAndOutFormats("xyz", "sdf")
-            ob_mol = openbabel.OBMol()
-            obConversion.ReadFile(ob_mol, tmp_file)
+        # Convert to sdf file with openbabel
+        # openbabel will add bonds
+        obConversion = openbabel.OBConversion()
+        obConversion.SetInAndOutFormats("xyz", "sdf")
+        ob_mol = openbabel.OBMol()
+        obConversion.ReadFile(ob_mol, tmp_file)
 
-            obConversion.WriteFile(ob_mol, tmp_file)
+        obConversion.WriteFile(ob_mol, tmp_file)
 
-            # Read sdf file with RDKit
-            tmp_mol = Chem.SDMolSupplier(tmp_file, sanitize=False)[0]
+        # Read sdf file with RDKit
+        tmp_mol = Chem.SDMolSupplier(tmp_file, sanitize=False)[0]
 
-        # Build new molecule. This is a workaround to remove radicals.
-        mol = Chem.RWMol()
-        for atom in tmp_mol.GetAtoms():
-            mol.AddAtom(Chem.Atom(atom.GetSymbol()))
-        mol.AddConformer(tmp_mol.GetConformer(0))
+    # Build new molecule. This is a workaround to remove radicals.
+    mol = Chem.RWMol()
+    for atom in tmp_mol.GetAtoms():
+        mol.AddAtom(Chem.Atom(atom.GetSymbol()))
+    mol.AddConformer(tmp_mol.GetConformer(0))
 
-        for bond in tmp_mol.GetBonds():
-            mol.AddBond(bond.GetBeginAtomIdx(), bond.GetEndAtomIdx(),
-                        bond.GetBondType())
+    for bond in tmp_mol.GetBonds():
+        mol.AddBond(bond.GetBeginAtomIdx(), bond.GetEndAtomIdx(),
+                    bond.GetBondType())
 
-        return mol
-    except Exception:
-        return None
+    return mol
 
 
 def make_mol_edm(positions, atom_types, dataset_info, add_coords):
