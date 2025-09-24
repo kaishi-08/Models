@@ -13,8 +13,7 @@ from tqdm import tqdm
 import numpy as np
 
 from Bio.PDB import PDBParser
-from Bio.PDB.Polypeptide import is_aa
-from Bio.SeqUtils  import seq1
+from Bio.PDB.Polypeptide import is_aa, three_to_one
 
 from rdkit import Chem
 from rdkit import RDLogger
@@ -44,7 +43,7 @@ def process_ligand_and_pocket(pdbfile, sdffile,
     # remove H atoms if not in atom_dict, other atom types that aren't allowed
     # should stay so that the entire ligand can be removed from the dataset
     lig_atoms = [a.GetSymbol() for a in ligand.GetAtoms()
-                 if (a.GetSymbol().capitalize() in atom_dict or a.GetSymbol() != 'H')]
+                 if (a.GetSymbol().capitalize() in atom_dict or a.element != 'H')]
     lig_coords = np.array([list(ligand.GetConformer(0).GetAtomPosition(idx))
                            for idx in range(ligand.GetNumAtoms())])
 
@@ -79,7 +78,7 @@ def process_ligand_and_pocket(pdbfile, sdffile,
                 for atom in res.get_atoms():
                     if atom.name == 'CA':
                         pocket_one_hot.append(np.eye(1, len(amino_acid_dict),
-                                                     amino_acid_dict[seq1(res.get_resname())]).squeeze())
+                                                     amino_acid_dict[three_to_one(res.get_resname())]).squeeze())
                         full_coords.append(atom.coord)
             pocket_one_hot = np.stack(pocket_one_hot)
             full_coords = np.stack(full_coords)
@@ -131,29 +130,32 @@ def compute_smiles(positions, one_hot, mask):
     atom_types = [torch.from_numpy(x) for x in np.split(atom_types, sections)]
 
     mols_smiles = []
-
+    fail = 0
     pbar = tqdm(enumerate(zip(positions, atom_types)),
                 total=len(np.unique(mask)))
     for i, (pos, atom_type) in pbar:
         mol = build_molecule(pos, atom_type, dataset_info)
 
         try:
-            Chem.SanitizeMol(mol)
-        except ValueError:
+            mol = Chem.MolToSmiles(mol)
+        except:
+            fail +=1
             continue
-
-        mol = rdmol_to_smiles(mol)
         if mol is not None:
             mols_smiles.append(mol)
-        pbar.set_description(f'{len(mols_smiles)}/{i+1} successful')
+        pbar.set_description(f'{len(mols_smiles)}/{i + 1} successful, {len(mols_smiles)}/{fail} fail')
 
     return mols_smiles
 
 
 def get_n_nodes(lig_mask, pocket_mask, smooth_sigma=None):
     # Joint distribution of ligand's and pocket's number of nodes
+    print(f"lig_mask shape: {lig_mask.shape}, unique values: {len(np.unique(lig_mask))}")
+    print(f"pocket_mask shape: {pocket_mask.shape}, unique values: {len(np.unique(pocket_mask))}")
+
     idx_lig, n_nodes_lig = np.unique(lig_mask, return_counts=True)
     idx_pocket, n_nodes_pocket = np.unique(pocket_mask, return_counts=True)
+
     assert np.all(idx_lig == idx_pocket)
 
     joint_histogram = np.zeros((np.max(n_nodes_lig) + 1,
@@ -254,45 +256,6 @@ def saveall(filename, pdb_and_mol_ids, lig_coords, lig_one_hot, lig_mask,
              )
     return True
 
-def create_train_test_splits(datadir, random_seed, max_samples = 1000):
-    if not datadir.is_dir():
-        raise NotADirectoryError(f"{datadir} is not a valid directory")
-    
-    index_file = datadir / "index.pkl"
-    if not index_file.exists():
-        raise FileNotFoundError(f"index.pkl not found at {index_file}")
-    
-    try:
-        with open(index_file, 'rb') as f:
-            index_data = pickle.load(f)
-        
-        print(f"Found {len(index_data)} entries")
-        
-        random.seed(random_seed)
-        indices = list(range(len(index_data)))
-        random.shuffle(indices)
-        indices = indices[:max_samples]
-        
-        n_total = len(indices)
-        n_train = int(0.8 * n_total)
-        n_val = int(0.1 * n_total)
-        n_test = n_total - n_train - n_val
-        
-        splits = {
-            'train': [index_data[i] for i in indices[:n_train]],
-            'val': [index_data[i] for i in indices[n_train:n_train + n_val]],
-            'test': [index_data[i] for i in indices[n_train + n_val:]]
-        }
-        split_file = Path(datadir.parent, "split_80_10_10.pt")
-        torch.save(splits, split_file)
-        print(f"Splits saved: train={len(splits['train'])}, val={len(splits['val'])}, test={len(splits['test'])}")
-        
-        return splits
-        
-    except Exception as e:
-        print(f"Error creating splits: {e}")
-        return None
-
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('basedir', type=Path)
@@ -325,21 +288,13 @@ if __name__ == '__main__':
 
     # Read data split
     split_path = Path(args.basedir, 'split_by_name.pt')
-    if split_path.exists():
-        print("Loading existing split...")
-        data_split = torch.load(split_path)
+    data_split =torch.load(split_path)
 
     # There is no validation set, copy 300 training examples (the validation set
     # is not very important in this application)
     # Note: before we had a data leak but it should not matter too much as most
     # metrics monitored during training are independent of the pockets
-        data_split['val'] = random.sample(data_split['train'], 300)
-    
-    else:
-        print("Creating new 80:10:10 split...")
-        data_split = create_train_test_splits(datadir, args.random_seed, max_samples=1000)
-        if data_split is None:
-            raise ValueError("Failed to create split!")
+    data_split['val'] = random.sample(data_split['train'], 300)
 
 
     n_train_before = len(data_split['train'])
@@ -451,13 +406,6 @@ if __name__ == '__main__':
     # Compute SMILES for all training examples
     train_smiles = compute_smiles(lig_coords, lig_one_hot, lig_mask)
     np.save(processed_dir / 'train_smiles.npy', train_smiles)
-
-    with np.load(processed_dir / 'val.npz', allow_pickle=True) as data:
-        lig_mask = data['lig_mask']
-        lig_coords = data['lig_coords']
-        lig_one_hot = data['lig_one_hot']
-        val_smiles = compute_smiles(lig_coords, lig_one_hot, lig_mask)
-        np.save(processed_dir / 'val_smiles.npy', val_smiles)
 
     # Joint histogram of number of ligand and pocket nodes
     n_nodes = get_n_nodes(lig_mask, pocket_mask, smooth_sigma=1.0)

@@ -69,7 +69,7 @@ def make_mol_openbabel(positions, atom_types, atom_decoder):
 
     with tempfile.NamedTemporaryFile() as tmp:
         tmp_file = tmp.name
-
+ 
         try:
             # Write xyz file
             utils.write_xyz_file(positions, atom_types, tmp_file)
@@ -100,8 +100,6 @@ def make_mol_openbabel(positions, atom_types, atom_decoder):
                     bond.GetBondType())
         
     return mol
-
-
 
 def make_mol_edm(positions, atom_types, dataset_info, add_coords):
     """
