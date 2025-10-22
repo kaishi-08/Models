@@ -16,7 +16,6 @@ from Bio.PDB.Polypeptide import three_to_one
 
 from constants import dataset_params, FLOAT_TYPE, INT_TYPE
 from egnn.dynamics import EGNNDynamics
-from equivariant_diffusion.en_diffusion import EnVariationalDiffusion
 from equivariant_diffusion.diffusion import Diffusion
 
 from dataset import ProcessedLigandPocketDataset
@@ -136,6 +135,7 @@ class LigandPocketDDPM(pl.LightningModule):
         net_dynamics = EGNNDynamics(
             atom_nf=self.atom_nf,
             residue_nf=self.aa_nf,
+            mode=egnn_params.mode,
             n_dims=self.x_dims,
             joint_nf=egnn_params.joint_nf,
             device=egnn_params.device if torch.cuda.is_available() else 'cpu',
@@ -355,7 +355,7 @@ class LigandPocketDDPM(pl.LightningModule):
                 raise e
 
         loss = nll.mean(0)
-
+        self.log('train_loss', loss, prog_bar=True, on_step=True, on_epoch=False, sync_dist=True)
         info['loss'] = loss
         self.log_metrics(info, 'train', batch_size=len(data['num_lig_atoms']))
 
@@ -378,7 +378,7 @@ class LigandPocketDDPM(pl.LightningModule):
     def test_step(self, data, *args):
         self._shared_eval(data, 'test', *args)
 
-    def validation_epoch_end(self, validation_step_outputs):
+    def on_validation_epoch_end(self):
 
         # Perform validation on single GPU
         if not self.trainer.is_global_zero:
@@ -870,7 +870,7 @@ class LigandPocketDDPM(pl.LightningModule):
 
         return molecules
 
-    def configure_gradient_clipping(self, optimizer, optimizer_idx,
+    def configure_gradient_clipping(self, optimizer,
                                     gradient_clip_val, gradient_clip_algorithm):
 
         if not self.clip_grad:

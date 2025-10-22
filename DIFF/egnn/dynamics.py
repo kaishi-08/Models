@@ -20,6 +20,7 @@ class EGNNDynamics(nn.Module):
                  reflection_equivariant=True, edge_embedding_dim=None):
         super().__init__()
         self.mode = mode
+        self.update_pocket_coords = update_pocket_coords
         self.edge_cutoff_l = edge_cutoff_ligand
         self.edge_cutoff_p = edge_cutoff_pocket
         self.edge_cutoff_i = edge_cutoff_interaction
@@ -73,7 +74,6 @@ class EGNNDynamics(nn.Module):
                 reflection_equiv=reflection_equivariant
             )
             self.node_nf = dynamics_node_nf
-            self.update_pocket_coords = update_pocket_coords
 
         elif mode == 'gnn_dynamics':
             self.gnn = GNN(
@@ -91,7 +91,6 @@ class EGNNDynamics(nn.Module):
                 normalization='layer', lmax=lmax,
                 rbf='expnormal', trainable_rbf=True
             )
-            self.update_pocket_coords = update_pocket_coords
 
         self.device = device
         self.n_dims = n_dims

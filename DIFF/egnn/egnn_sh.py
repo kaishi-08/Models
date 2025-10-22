@@ -377,7 +377,7 @@ class EGNN_Spherical(nn.Module):
         self.num_rbf = num_rbf
         self.normalization = normalization
 
-        irreps_hidden = o3.Irrep(
+        irreps_hidden = o3.Irreps(
             f"{hidden_nf}x0e + {hidden_nf//2}x1o + {hidden_nf//4}x2e"
         )
         

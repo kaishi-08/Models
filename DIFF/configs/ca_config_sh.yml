@@ -8,11 +8,7 @@ datadir: '/media/kenthai/Research02/ThangD21/DIFF/data/data/data/processed_cross
 enable_progress_bar: True
 num_sanity_val_steps: 0
 
-
-mode: 'egnn_spherical'  
-
-joint_nf: 128 
-
+mode: 'pocket_conditioning'  
 pocket_representation: 'CA'
 batch_size: 16
 lr: 1.0e-3
@@ -31,13 +27,22 @@ loss_params:
   schedule: 'linear'
   clamp_lj: 3.0
 
-# THAY ĐỔI 3: Cập nhật toàn bộ khối tham số cho EGNN_Spherical
 egnn_params:
+  mode: egnn_spherical
   device: 'cuda'
+  joint_nf: 128                   
   hidden_nf: 256
   n_layers: 6
+  attention: False               
+  tanh: False                     
+  norm_constant: 1                 
+  inv_sublayers: 2               
+  sin_embedding: False             
+  normalization_factor: 100        
+  aggregation_method: 'sum'        
+  reflection_equivariant: True     #
   
-  # EGNN_Spherical 
+  # Spherical harmonics specific parameters 
   lmax: 2                  
   num_rbf: 16               
   max_radius: 5.0           
@@ -45,9 +50,11 @@ egnn_params:
   rbf: 'expnormal'          
   trainable_rbf: True      
   
+  # Edge cutoff parameters
   edge_cutoff_ligand: null
   edge_cutoff_pocket: 5.0
   edge_cutoff_interaction: 5.0
+  edge_embedding_dim: null        
   
 diffusion_params:
   diffusion_steps: 500

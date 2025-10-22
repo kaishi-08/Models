@@ -28,6 +28,7 @@ loss_params:
   clamp_lj: 3.0
 
 egnn_params:
+  mode: egnn_dynamics
   device: 'cuda'
   edge_cutoff_ligand: null
   edge_cutoff_pocket: 5.0
