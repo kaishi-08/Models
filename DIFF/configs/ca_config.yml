@@ -1,25 +1,25 @@
-run_name: 'crossdock_full_cond_egnn'
+run_name: 'SE3-cond-CA'
 logdir: '/media/kenthai/Research02/ThangD21/DIFF/logs/train'
 wandb_params:
   mode: 'disabled'  # disabled, offline, online
   entity: 'Thang'
-dataset: 'crossdock_full'
-datadir: '/media/kenthai/Research02/ThangD21/DIFF/data/data/data/processed_crossdock_noH_full_temp'
+dataset: 'crossdock'
+datadir: '/media/kenthai/Research02/ThangD21/DIFF/data/data/data/processed_crossdock_noH_ca_only_temp'
 enable_progress_bar: True
 num_sanity_val_steps: 0
 
 mode: 'pocket_conditioning'  # joint, pocket_conditioning
-pocket_representation: 'full-atom'  # CA, full-atom
-batch_size: 1
+pocket_representation: 'CA'  # CA, full-atom
+batch_size: 16
 lr: 1.0e-3
 noise_factor: 1.0
 n_epochs: 1000
-num_workers: 
+num_workers: 1
 gpus: 1
 clip_grad: True
 augment_rotation: False
 augment_noise: 0
-accumulate_grad_batches: 32
+accumulate_grad_batches: 2
 
 auxiliary_loss: False
 loss_params:
@@ -57,6 +57,6 @@ visualize_chain_epoch: 50
 eval_params:
   n_eval_samples: 100
   eval_batch_size: 100
-  smiles_file: '/media/kenthai/Research02/ThangD21/DIFF/data/data/data/processed_crossdock_noH_full_temp/train_smiles.npy'
+  smiles_file: '/media/kenthai/Research02/ThangD21/DIFF/data/data/data/processed_crossdock_noH_ca_only_temp/train_smiles.npy'
   n_visualize_samples: 5
   keep_frames: 100

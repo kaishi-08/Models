@@ -2,18 +2,19 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from egnn.egnn import EGNN, GNN
-from equivariant_diffusion.en_diffusion import EnVariationalDiffusion
-remove_mean_batch = EnVariationalDiffusion.remove_mean_batch
+from egnn.egnn_sh import EGNN_Spherical
 import numpy as np
+from equivariant_diffusion.diffusion import Diffusion
+remove_mean_batch = Diffusion.remove_mean_batch
 
 
 class EGNNDynamics(nn.Module):
     def __init__(self, atom_nf, residue_nf,
                  n_dims, joint_nf=16, hidden_nf=64, device='cpu',
                  act_fn=torch.nn.SiLU(), n_layers=4, attention=False,
-                 condition_time=True, tanh=False, mode='egnn_dynamics',
+                 condition_time=True, tanh=False, mode='egnn_spherical',
                  norm_constant=0, inv_sublayers=2, sin_embedding=False,
-                 normalization_factor=100, aggregation_method='sum',
+                 normalization_factor=100, out_node_nf=None, lmax=2, aggregation_method='sum',
                  update_pocket_coords=True, edge_cutoff_ligand=None,
                  edge_cutoff_pocket=None, edge_cutoff_interaction=None,
                  reflection_equivariant=True, edge_embedding_dim=None):
@@ -23,6 +24,8 @@ class EGNNDynamics(nn.Module):
         self.edge_cutoff_p = edge_cutoff_pocket
         self.edge_cutoff_i = edge_cutoff_interaction
         self.edge_nf = edge_embedding_dim
+        self.out_node_nf=out_node_nf
+        self.lmax=lmax
 
         self.atom_encoder = nn.Sequential(
             nn.Linear(atom_nf, 2 * atom_nf),
@@ -79,10 +82,21 @@ class EGNNDynamics(nn.Module):
                 device=device, act_fn=act_fn, n_layers=n_layers,
                 attention=attention, normalization_factor=normalization_factor,
                 aggregation_method=aggregation_method)
+        
+        elif mode =='egnn_spherical':
+            self.egnn_spherical = EGNN_Spherical(
+                in_node_nf=dynamics_node_nf, in_edge_nf=self.edge_nf,
+                hidden_nf=hidden_nf, device=device, act_fn=act_fn,
+                n_layers=n_layers, out_node_nf=dynamics_node_nf,
+                normalization='layer', lmax=lmax,
+                rbf='expnormal', trainable_rbf=True
+            )
+            self.update_pocket_coords = update_pocket_coords
 
         self.device = device
         self.n_dims = n_dims
         self.condition_time = condition_time
+
 
     def forward(self, xh_atoms, xh_residues, t, mask_atoms, mask_residues):
 
@@ -140,6 +154,14 @@ class EGNNDynamics(nn.Module):
             output = self.gnn(xh, edges, node_mask=None, edge_attr=edge_types)
             vel = output[:, :3]
             h_final = output[:, 3:]
+        
+        elif self.mode =='egnn_spherical':
+            update_coords_mask = None if self.update_pocket_coords \
+                else torch.cat((torch.ones_like(mask_atoms),
+                                torch.zeros_like(mask_residues))).unsqueeze(1)
+            h_final, x_final = self.egnn_spherical(h,x, edges, update_coords_mask=update_coords_mask,
+                                                   batch_mask=mask, edge_attr=edge_types)
+            vel = (x_final-x)
 
         else:
             raise Exception("Wrong mode %s" % self.mode)

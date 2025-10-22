@@ -1,0 +1,33 @@
+name: diff
+channels:
+  - pytorch
+  - nvidia
+  - pyg
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - pytorch 
+  - torchvision 
+  - torchaudio
+  - pytorch-cuda=12.1
+
+  - pytorch-lightning
+  - rdkit
+  - openbabel
+  - biopython
+  - numpy
+  - pandas
+  - scipy
+  - networkx
+  - torchmetrics
+  - wandb
+  - imageio
+  - seaborn
+  - tqdm
+  - pyyaml
+  - protobuf=3.20.*
+
+  - pip:
+    - e3nn

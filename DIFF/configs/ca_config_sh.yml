@@ -1,0 +1,67 @@
+run_name: 'SE3-cond-CA-Spherical' 
+logdir: '/media/kenthai/Research02/ThangD21/DIFF/logs/train'
+wandb_params:
+  mode: 'disabled'
+  entity: 'Thang'
+dataset: 'crossdock'
+datadir: '/media/kenthai/Research02/ThangD21/DIFF/data/data/data/processed_crossdock_noH_ca_only_temp'
+enable_progress_bar: True
+num_sanity_val_steps: 0
+
+
+mode: 'egnn_spherical'  
+
+joint_nf: 128 
+
+pocket_representation: 'CA'
+batch_size: 16
+lr: 1.0e-3
+noise_factor: 1.0
+n_epochs: 1000
+num_workers: 1
+gpus: 1
+clip_grad: True
+augment_rotation: False
+augment_noise: 0
+accumulate_grad_batches: 2
+
+auxiliary_loss: False
+loss_params:
+  max_weight: 0.001
+  schedule: 'linear'
+  clamp_lj: 3.0
+
+# THAY ĐỔI 3: Cập nhật toàn bộ khối tham số cho EGNN_Spherical
+egnn_params:
+  device: 'cuda'
+  hidden_nf: 256
+  n_layers: 6
+  
+  # EGNN_Spherical 
+  lmax: 2                  
+  num_rbf: 16               
+  max_radius: 5.0           
+  normalization: 'layer'   
+  rbf: 'expnormal'          
+  trainable_rbf: True      
+  
+  edge_cutoff_ligand: null
+  edge_cutoff_pocket: 5.0
+  edge_cutoff_interaction: 5.0
+  
+diffusion_params:
+  diffusion_steps: 500
+  diffusion_noise_schedule: 'polynomial_2'
+  diffusion_noise_precision: 5.0e-4
+  diffusion_loss_type: 'l2'
+  normalize_factors: [1, 4]
+
+eval_epochs: 50
+visualize_sample_epoch: 50
+visualize_chain_epoch: 50
+eval_params:
+  n_eval_samples: 100
+  eval_batch_size: 100
+  smiles_file: '/media/kenthai/Research02/ThangD21/DIFF/data/data/data/processed_crossdock_noH_ca_only_temp/train_smiles.npy'
+  n_visualize_samples: 5
+  keep_frames: 100

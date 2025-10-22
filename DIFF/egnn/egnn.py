@@ -28,7 +28,7 @@ class GCL(nn.Module):
                 nn.Linear(hidden_nf, 1),
                 nn.Sigmoid())
 
-    def edge_model(self, source, target, edge_attr, edge_mask):
+    def edge_model(self, source, target, edge_attr, edge_mask): 
         if edge_attr is None:  # Unused.
             out = torch.cat([source, target], dim=1)
         else:
