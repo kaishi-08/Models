@@ -40,7 +40,7 @@ egnn_params:
   sin_embedding: False             
   normalization_factor: 100        
   aggregation_method: 'sum'        
-  reflection_equivariant: True     #
+  reflection_equivariant: True     #  
   
   # Spherical harmonics specific parameters 
   lmax: 2                  
@@ -54,7 +54,10 @@ egnn_params:
   edge_cutoff_ligand: null
   edge_cutoff_pocket: 5.0
   edge_cutoff_interaction: 5.0
-  edge_embedding_dim: null        
+  edge_embedding_dim: null      
+ 
+  convolution_type: 'separable'
+  weight_mode: 'scalar'  
   
 diffusion_params:
   diffusion_steps: 500

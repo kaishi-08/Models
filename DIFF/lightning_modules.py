@@ -155,6 +155,8 @@ class LigandPocketDDPM(pl.LightningModule):
             update_pocket_coords=(self.mode == 'joint'),
             reflection_equivariant=egnn_params.reflection_equivariant,
             edge_embedding_dim=egnn_params.__dict__.get('edge_embedding_dim'),
+            convolution_type=egnn_params.__dict__.get('convolution_type', 'separable'),
+            weight_mode=egnn_params.__dict__.get('weight_mode', 'scalar')
         )
 
         self.ddpm = ddpm_models[self.mode](
@@ -810,30 +812,8 @@ class LigandPocketDDPM(pl.LightningModule):
         num_nodes_lig = torch.clamp(num_nodes_lig, min=n_nodes_min)
 
         # Use inpainting
-        if type(self.ddpm) == EnVariationalDiffusion:
-            lig_mask = utils.num_nodes_to_batch_mask(
-                len(num_nodes_lig), num_nodes_lig, self.device)
-
-            ligand = {
-                'x': torch.zeros((len(lig_mask), self.x_dims),
-                                 device=self.device, dtype=FLOAT_TYPE),
-                'one_hot': torch.zeros((len(lig_mask), self.atom_nf),
-                                       device=self.device, dtype=FLOAT_TYPE),
-                'size': num_nodes_lig,
-                'mask': lig_mask
-            }
-
-            # Fix all pocket nodes but sample
-            lig_mask_fixed = torch.zeros(len(lig_mask), device=self.device)
-            pocket_mask_fixed = torch.ones(len(pocket['mask']),
-                                           device=self.device)
-
-            xh_lig, xh_pocket, lig_mask, pocket_mask = self.ddpm.inpaint(
-                ligand, pocket, lig_mask_fixed, pocket_mask_fixed,
-                timesteps=timesteps, **kwargs)
-
         # Use conditional generation
-        elif type(self.ddpm) == Diffusion:
+        if type(self.ddpm) == Diffusion:
             xh_lig, xh_pocket, lig_mask, pocket_mask = \
                 self.ddpm.sample_given_pocket(pocket, num_nodes_lig,
                                               timesteps=timesteps)
