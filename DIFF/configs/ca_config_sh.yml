@@ -48,7 +48,10 @@ egnn_params:
   max_radius: 5.0           
   normalization: 'layer'   
   rbf: 'expnormal'          
-  trainable_rbf: True      
+  trainable_rbf: True   
+
+  block_type: 'conv'              
+  max_correlation_order: 3  
   
   # Edge cutoff parameters
   edge_cutoff_ligand: null

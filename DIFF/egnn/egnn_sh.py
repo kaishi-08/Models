@@ -7,7 +7,10 @@ from e3nn.nn import Gate, BatchNorm
 from e3nn.o3 import Linear, FullyConnectedTensorProduct
 from torch_scatter import scatter
 import math
-
+from mace.modules import (
+    RealAgnosticInteractionBlock, 
+    EquivariantProductBasisBlock)
+from mace.modules.blocks import RealAgnosticResidualInteractionBlock as ResidualBlock
 
 class CosineCutoff(nn.Module):
     """
@@ -27,7 +30,6 @@ class CosineCutoff(nn.Module):
         cutoffs = 0.5 * (torch.cos(distances * math.pi / self.cutoff) + 1.0)
         cutoffs = cutoffs * (distances < self.cutoff).to(cutoffs.dtype)
         return cutoffs
-
 
 class ExpNormalSmearing(nn.Module):
     """
@@ -102,343 +104,6 @@ class GaussianSmearing(nn.Module):
         """
         distances = distances.unsqueeze(-1)
         return torch.exp(-0.5 * ((distances - self.offset) / self.width) ** 2)
-    
-class SymmetricTensorProduct(nn.Module):
-    """
-    Efficient symmetric tensor product using e3nn's TensorProduct with
-    symmetric instructions. This is more efficient than FullyConnectedTensorProduct
-    for MACE-style many-body features.
-    
-    Implements: A ⊗ A ⊗ ... ⊗ A (n times) with symmetrization
-    """
-    def __init__(self, irreps_in, irreps_out, correlation_order, shared_weights=True):
-        super().__init__()
-        
-        self.irreps_in = o3.Irreps(irreps_in)
-        self.irreps_out = o3.Irreps(irreps_out)
-        self.correlation_order = correlation_order
-        
-        if correlation_order == 1:
-            # Just a linear mapping for 2-body
-            self.tp = Linear(self.irreps_in, self.irreps_out)
-        elif correlation_order == 2:
-            # 3-body: A ⊗ A with symmetric coupling
-            self.tp = self._build_symmetric_tp_order2()
-        else:
-            # Higher orders: iterative symmetric coupling
-            self.tps = nn.ModuleList()
-            current_irreps = self.irreps_in
-            
-            for i in range(correlation_order - 1):
-                if i == correlation_order - 2:
-                    # Last one outputs to irreps_out
-                    tp = self._build_pairwise_symmetric_tp(
-                        current_irreps, self.irreps_in, self.irreps_out
-                    )
-                else:
-                    # Intermediate tensor products
-                    tp = self._build_pairwise_symmetric_tp(
-                        current_irreps, self.irreps_in, self.irreps_in
-                    )
-                    current_irreps = self.irreps_in
-                
-                self.tps.append(tp)
-    
-    def _build_symmetric_tp_order2(self):
-        """Build symmetric tensor product for A ⊗ A"""
-        # Create instructions for symmetric coupling only
-        instructions = []
-        
-        for i, (mul_i, ir_i) in enumerate(self.irreps_in):
-            for j, (mul_j, ir_j) in enumerate(self.irreps_in):
-                # Only include i <= j for symmetry (no duplicate pairs)
-                if i > j:
-                    continue
-                    
-                for ir_out in ir_i * ir_j:
-                    # Check if this irrep is in our output
-                    for k, (mul_k, ir_k) in enumerate(self.irreps_out):
-                        if ir_out == ir_k:
-                            # Add instruction: (input1_idx, input2_idx, output_idx, mode, train, path_weight)
-                            # mode: 'uvw' for standard, 'uvu' for symmetric (u=input1, v=input2, w=output)
-                            mode = 'uvu' if i == j else 'uvw'
-                            instructions.append((i, j, k, mode, True, 1.0))
-        
-        # Build tensor product with symmetric instructions
-        return TensorProduct(
-            self.irreps_in,
-            self.irreps_in, 
-            self.irreps_out,
-            instructions=instructions,
-            shared_weights=True,
-            internal_weights=True
-        )
-    
-    def _build_pairwise_symmetric_tp(self, irreps1, irreps2, irreps_out):
-        """Build tensor product between two potentially different irreps"""
-        instructions = []
-        
-        irreps1 = o3.Irreps(irreps1)
-        irreps2 = o3.Irreps(irreps2)
-        irreps_out = o3.Irreps(irreps_out)
-        
-        for i, (mul_i, ir_i) in enumerate(irreps1):
-            for j, (mul_j, ir_j) in enumerate(irreps2):
-                for ir_out in ir_i * ir_j:
-                    for k, (mul_k, ir_k) in enumerate(irreps_out):
-                        if ir_out == ir_k:
-                            instructions.append((i, j, k, 'uvw', True, 1.0))
-        
-        return TensorProduct(
-            irreps1,
-            irreps2,
-            irreps_out,
-            instructions=instructions,
-            shared_weights=True,
-            internal_weights=True
-        )
-    
-    def forward(self, x):
-        """
-        Args:
-            x: [N, irreps_in.dim]
-        Returns:
-            [N, irreps_out.dim]
-        """
-        if self.correlation_order == 1:
-            return self.tp(x)
-        elif self.correlation_order == 2:
-            return self.tp(x, x)
-        else:
-            # Iteratively apply tensor products
-            result = x
-            for tp in self.tps:
-                result = tp(result, x)
-            return result
-
-
-class MACEConvolutionLayer(nn.Module):
-    """
-    MACE-inspired many-body message passing layer using efficient symmetric
-    tensor products for higher-order interactions.
-    
-    This implementation uses o3.TensorProduct with symmetric instructions
-    instead of FullyConnectedTensorProduct for better efficiency.
-    
-    Key equations from MACE paper:
-    - Equation (8): A-features construction with spherical harmonics
-    - Equation (10): B-features via symmetric tensor products
-    - Equation (11): Message as linear combination of B-features
-    
-    References:
-        Batatia et al. "MACE: Higher Order Equivariant Message Passing 
-        Neural Networks for Fast and Accurate Force Fields" NeurIPS 2022
-    """
-    def __init__(
-        self, 
-        irreps_node_input,
-        irreps_node_hidden,
-        irreps_sh,
-        max_correlation_order=3,  # ν in paper (1=2-body, 2=3-body, 3=4-body)
-        num_channels=128,
-        edge_features_dim=16,
-        num_radial_basis=8,
-        hidden_dim=64,
-        normalization='layer',
-        use_self_connection=True
-    ):
-        super().__init__()
-        
-        self.irreps_node_input = o3.Irreps(irreps_node_input)
-        self.irreps_node_hidden = o3.Irreps(irreps_node_hidden)
-        self.irreps_sh = o3.Irreps(irreps_sh)
-        
-        self.max_correlation_order = max_correlation_order
-        self.num_channels = num_channels
-        self.use_self_connection = use_self_connection
-        
-        # ============ Radial Network (R in Equation 8) ============
-        radial_input_dim = num_radial_basis + edge_features_dim
-        
-        self.radial_mlp = nn.Sequential(
-            nn.Linear(radial_input_dim, hidden_dim),
-            nn.SiLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.SiLU(),
-            nn.Linear(hidden_dim, hidden_dim)
-        )
-        
-        # ============ Node Feature Embedding (W in Equation 8) ============
-        # Project input features to scalar channels
-        self.node_embedding = Linear(
-            self.irreps_node_input,
-            o3.Irreps(f"{num_channels}x0e")
-        )
-        
-        # ============ A-features: Tensor Product with Spherical Harmonics ============
-        # Build efficient tensor product for node_scalars ⊗ spherical_harmonics
-        # This creates directional 2-body features
-        self.a_features_tp = TensorProduct(
-            o3.Irreps(f"{num_channels}x0e"),
-            self.irreps_sh,
-            self.irreps_node_hidden,
-            instructions=[
-                (i, j, k, 'uvw', True, 1.0)
-                for i, (mul_i, ir_i) in enumerate([o3.Irrep('0e')] * num_channels)
-                for j, (mul_j, ir_j) in enumerate(self.irreps_sh)
-                for k, (mul_k, ir_k) in enumerate(self.irreps_node_hidden)
-                if ir_i * ir_j == ir_k
-            ],
-            shared_weights=False,
-            internal_weights=False
-        )
-        
-        # Weights for A-features tensor product (controlled by radial network)
-        self.a_tp_weights = nn.Linear(hidden_dim, self.a_features_tp.weight_numel)
-        
-        # ============ B-features: Symmetric Tensor Products ============
-        # Create symmetric tensor products for different correlation orders
-        # This is the key innovation: efficient many-body without explicit summation
-        
-        self.symmetric_contractions = nn.ModuleList()
-        self.channel_mixing = nn.ModuleList()
-        
-        # Extract scalar and low-L irreps for tensor products
-        # (higher L are expensive, MACE typically uses up to L=2)
-        self.tp_irreps = o3.Irreps([
-            (mul, ir) for mul, ir in self.irreps_node_hidden 
-            if ir.l <= 2
-        ])
-        
-        for order in range(1, max_correlation_order + 1):
-            # Symmetric tensor product for this correlation order
-            symmetric_tp = SymmetricTensorProduct(
-                irreps_in=self.tp_irreps,
-                irreps_out=self.irreps_node_hidden,
-                correlation_order=order,
-                shared_weights=True
-            )
-            self.symmetric_contractions.append(symmetric_tp)
-            
-            # Channel mixing (linear projection)
-            channel_mix = Linear(self.irreps_node_hidden, self.irreps_node_hidden)
-            self.channel_mixing.append(channel_mix)
-        
-        # ============ Message Combination (Equation 11) ============
-        # Combine B-features from different correlation orders
-        self.message_combination = nn.ModuleList([
-            Linear(self.irreps_node_hidden, self.irreps_node_hidden)
-            for _ in range(max_correlation_order)
-        ])
-        
-        # ============ Self-interaction and Update ============
-        if use_self_connection:
-            self.self_interaction = Linear(
-                self.irreps_node_input,
-                self.irreps_node_hidden
-            )
-        
-        # Optional normalization
-        if normalization == 'layer':
-            from e3nn.nn import BatchNorm
-            self.norm = BatchNorm(self.irreps_node_hidden)
-        elif normalization == 'instance':
-            from e3nn.nn import BatchNorm
-            self.norm = BatchNorm(self.irreps_node_hidden, instance=True)
-        else:
-            self.norm = None
-    
-    def forward(
-        self, 
-        node_features,  # h^(t): [N, irreps_node_input.dim]
-        edge_index,     # [2, E]
-        edge_sh,        # Y_l^m: [E, irreps_sh.dim]
-        edge_radial_embedding,  # [E, num_radial_basis]
-        edge_attr=None, # [E, edge_features_dim]
-        batch_mask=None # [N]
-    ):
-        """
-        Forward pass implementing MACE's efficient many-body message passing.
-        
-        Returns:
-            [N, irreps_node_hidden.dim] - updated node features
-        """
-        src, dst = edge_index
-        num_nodes = node_features.shape[0]
-        
-        # ============ Step 1: Construct A-features (Equation 8) ============
-        # A_i = Σ_j R(r_ij) Y(r̂_ij) ⊗ W h_j
-        
-        # Embed node features to scalars
-        h_scalars = self.node_embedding(node_features)  # [N, num_channels]
-        
-        # Radial weighting
-        if edge_attr is not None:
-            radial_input = torch.cat([edge_radial_embedding, edge_attr], dim=-1)
-        else:
-            radial_input = edge_radial_embedding
-        
-        radial_features = self.radial_mlp(radial_input)  # [E, hidden_dim]
-        
-        # Get weights for tensor product from radial network
-        tp_weights = self.a_tp_weights(radial_features)  # [E, weight_numel]
-        
-        # Edge-wise tensor product: h_j ⊗ Y(r̂_ij)
-        edge_messages = self.a_features_tp(
-            h_scalars[src],  # [E, num_channels]
-            edge_sh,         # [E, irreps_sh.dim]
-            tp_weights       # [E, weight_numel]
-        )  # [E, irreps_node_hidden.dim]
-        
-        # Aggregate messages to nodes (Equation 8 summation)
-        a_features = scatter(
-            edge_messages,
-            dst,
-            dim=0,
-            dim_size=num_nodes,
-            reduce='mean'  # or 'sum' depending on normalization preference
-        )  # [N, irreps_node_hidden.dim]
-        
-        # ============ Step 2: Construct B-features (Equation 10) ============
-        # B^ν = Σ C^{LM}_{η_ν,lm} Π_{ξ=1}^ν (Σ_k w A)
-        # Symmetric tensor products for different correlation orders
-        
-        # Extract features for tensor product (only up to L=2)
-        a_for_tp = a_features  # Already in correct irreps from a_features_tp output
-        
-        b_features_list = []
-        for order_idx, (symmetric_tp, channel_mix) in enumerate(
-            zip(self.symmetric_contractions, self.channel_mixing)
-        ):
-            # Apply symmetric tensor product
-            b_feat = symmetric_tp(a_for_tp)  # [N, irreps_node_hidden.dim]
-            
-            # Channel mixing
-            b_feat = channel_mix(b_feat)
-            
-            b_features_list.append(b_feat)
-        
-        # ============ Step 3: Construct Messages (Equation 11) ============
-        # m = Σ_ν W_{z_i} B^ν
-        
-        messages = None
-        for b_feat, linear in zip(b_features_list, self.message_combination):
-            msg_contribution = linear(b_feat)
-            messages = msg_contribution if messages is None else messages + msg_contribution
-        
-        # ============ Step 4: Update (Equation 12) ============
-        # h^{t+1} = U(h^t, m^t) with residual connection
-        
-        if self.use_self_connection:
-            output = messages + self.self_interaction(node_features)
-        else:
-            output = messages
-        
-        # Normalization for stability
-        if self.norm is not None:
-            output = self.norm(output)
-        
-        return output
 
 
 class MACEBlock(nn.Module):
@@ -453,52 +118,74 @@ class MACEBlock(nn.Module):
     """
     def __init__(
         self,
-        irreps_node_input,
-        irreps_node_hidden, 
-        irreps_sh,
+        irreps_node_input: o3.Irreps,
+        irreps_node_hidden: o3.Irreps, 
+        irreps_sh: o3.Irreps,
         max_correlation_order=3,  # 4-body interactions by default
-        num_channels=128,
-        edge_features_dim=16,
-        num_radial_basis=8,
-        hidden_dim=64,
-        normalization='layer',
-        use_self_connection=True
+        hidden_dim=64, 
+        num_rbf: int = 16,
     ):
         super().__init__()
-        
+        self.norm = BatchNorm(irreps_node_hidden)
         self.max_correlation_order = max_correlation_order
         
-        self.conv = MACEConvolutionLayer(
-            irreps_node_input=irreps_node_input,
-            irreps_node_hidden=irreps_node_hidden,
-            irreps_sh=irreps_sh,
-            max_correlation_order=max_correlation_order,
-            num_channels=num_channels,
-            edge_features_dim=edge_features_dim,
-            num_radial_basis=num_radial_basis,
-            hidden_dim=hidden_dim,
-            normalization=normalization,
-            use_self_connection=use_self_connection
+        self.interaction = RealAgnosticInteractionBlock(
+            node_feats_irreps=irreps_node_input,
+            target_irreps=irreps_node_hidden,
+            hidden_irreps=o3.Irreps(f"{hidden_dim}x0e"),
+            avg_num_neighbors=1.0,
+            edge_attrs_irreps=irreps_sh,
+            # Cần cung cấp irreps cho radial features để MLP được khởi tạo đúng
+            edge_feats_irreps=o3.Irreps(f"{num_rbf}x0e"), 
+            node_attrs_irreps=o3.Irreps("1x0e")
+        )
+        
+        # Bước 2: Khối Many-Body (Product Basis) để tạo message cuối cùng
+        self.product_basis = EquivariantProductBasisBlock(
+            node_feats_irreps=irreps_node_hidden, # Đầu vào là A-features
+            target_irreps=irreps_node_hidden,      # Đầu ra là message
+            correlation=max_correlation_order,
+            use_sc=False,
+            use_agnostic_product=True # Tự xử lý skip connection bên ngoài cho rõ ràng
+        )
+
+        # Bước 3: Lớp Linear đơn giản cho kết nối sót (Skip Connection)
+        self.skip_connection = Linear(
+            irreps_in=irreps_node_input, 
+            irreps_out=irreps_node_hidden
         )
     
-    def forward(self, h, edge_index, edge_sh, edge_radial_embedding, 
-                edge_attr=None, batch_mask=None):
-        """
-        Args:
-            h: [N, irreps_node_input.dim] - node features
-            edge_index: [2, E] - edge connectivity
-            edge_sh: [E, irreps_sh.dim] - spherical harmonics
-            edge_radial_embedding: [E, num_radial_basis] - radial basis functions
-            edge_attr: [E, edge_features_dim] - optional edge attributes
-            batch_mask: [N] - batch indices for normalization
-        
-        Returns:
-            [N, irreps_node_hidden.dim] - updated node features
-        """
-        return self.conv(
-            h, edge_index, edge_sh, edge_radial_embedding, 
-            edge_attr, batch_mask
+    def forward(self, h, edge_index, edge_sh, edge_radial_embedding, **kwargs):
+        # Các khối mace-torch yêu cầu `node_attrs`. Vì mô hình của bạn
+        # không có, chúng ta tạo một tensor giả chứa các số 1.
+        node_attrs_dummy = torch.ones_like(h[:, 0:1])
+
+        # Bước 1: Tạo A-features từ tương tác 2-body
+        # Hàm forward của InteractionBlock trả về một tuple (message, sc)
+        # SỬA Ở ĐÂY: Dùng `node_feats` thay vì `node_input`
+        a_features, sc = self.interaction(
+            node_feats=h,
+            node_attrs=node_attrs_dummy,
+            edge_attrs=edge_sh,
+            edge_feats=edge_radial_embedding,
+            edge_index=edge_index
         )
+        
+        # Bước 2: Tạo message cuối cùng từ tương tác many-body
+        # SỬA Ở ĐÂY: Dùng `node_feats` thay vì `node_input`
+        messages = self.product_basis(
+            node_feats=a_features,
+            sc=sc, # Truyền skip connection từ bước tương tác
+            node_attrs=node_attrs_dummy
+        )
+        
+        # Bước 3: Cập nhật với kết nối sót (trong trường hợp MACE đơn giản)
+        # hoặc có thể là một khối residual hoàn chỉnh
+        # SỬA Ở ĐÂY: Dùng `node_feats` thay vì `node_input`
+        skip = self.skip_connection(h)
+        h_out = messages + skip
+        h_out = self.norm(h_out)
+        return h_out
     
 class SeparableSphericalConvolution(nn.Module):
 
@@ -549,7 +236,7 @@ class SeparableSphericalConvolution(nn.Module):
             self.edge_mlp = nn.Sequential(
                     nn.Linear(edge_features, hidden_dim),
                     nn.SiLU(),
-                    nn.Linear(edge_features, hidden_dim),
+                    nn.Linear(hidden_dim, hidden_dim),
                     nn.SiLU(),
                     nn.Linear(hidden_dim, 1) # Output a single scalar
                 )
@@ -890,7 +577,9 @@ class EGNN_Spherical(nn.Module):
                  out_node_nf=None, lmax=2, num_rbf=16,
                  max_radius=10.0, normalization='layer',
                  aggregation_method='mean', reflection_equiv=True,
-                 rbf="expnormal", trainable_rbf=True, convolution_type='separable', weight_mode='dynamic'):
+                 rbf="expnormal", trainable_rbf=True, 
+                 block_type='conv', max_correlation_order =3,
+                 convolution_type='separable', weight_mode='dynamic'):
         super().__init__()
 
         if out_node_nf is None:
@@ -905,10 +594,20 @@ class EGNN_Spherical(nn.Module):
         self.normalization = normalization
         self.convolution_type = convolution_type
         self.weight_mode = weight_mode
-
-        irreps_hidden = o3.Irreps(
+        self.block_type = block_type
+        
+        """
+                irreps_hidden = o3.Irreps(
             f"{hidden_nf//2}x0e + {hidden_nf//4}x1o + {hidden_nf//8}x2e"
         )
+        """
+
+        
+        num_channels = hidden_nf // 2
+
+        irreps_string = "+".join([f"{num_channels}x{l}{p}" for l in range(lmax + 1) for p in [-1, 1] if l % 2 == (p + 1) % 2])
+        irreps_string = f"{num_channels}x0e + {num_channels}x1o + {num_channels}x2e"
+        irreps_hidden = o3.Irreps(irreps_string)
         
         self.irreps_sh = o3.Irreps.spherical_harmonics(lmax)
 
@@ -935,30 +634,48 @@ class EGNN_Spherical(nn.Module):
             o3.Irreps(f"{irreps_hidden[0].dim}x0e"),
             irreps_hidden
         )
-
-        # Convolution layer
         self.conv_layers = nn.ModuleList()
+
+        current_irreps = self.scalar_to_irreps.irreps_out
+        
         for i in range(n_layers):
-            self.conv_layers.append(
-                SphericalHarmonicsBlock(
-                irreps_hidden=irreps_hidden,
-                irreps_sh=self.irreps_sh,
-                edge_features=self.edge_embed_dim,
-                hidden_dim = hidden_nf,
-                residual=True,
-                normalization=normalization,
-                conv_type=self.convolution_type,
-                weight_mode=self.weight_mode
-            )
-        )
+            if self.block_type == 'mace':
+                block = MACEBlock(
+                    irreps_node_input=current_irreps,
+                    irreps_node_hidden=irreps_hidden,
+                    irreps_sh=self.irreps_sh,
+                    max_correlation_order=max_correlation_order,
+                    hidden_dim=hidden_nf, num_rbf=self.num_rbf
+                )                    
+                current_irreps = irreps_hidden
+
+            elif self.block_type == 'conv':
+                block_irreps_in = current_irreps if i == 0 else irreps_hidden
+                
+                block = SphericalHarmonicsBlock(
+                    irreps_hidden=block_irreps_in, # Sửa lại để linh hoạt hơn
+                    irreps_sh=self.irreps_sh,
+                    edge_features=self.edge_embed_dim,
+                    hidden_dim=hidden_nf,
+                    residual=True,
+                    normalization=normalization,
+                    conv_type=convolution_type,
+                    weight_mode=weight_mode
+                )
+                # Đầu ra của SphericalHarmonicsBlock cũng là irreps_hidden
+                current_irreps = irreps_hidden
+
+            else:
+                raise ValueError(f"Unknown block_type: {self.block_type}. Choose 'conv' or 'mace'.")
             
+            self.conv_layers.append(block)
         # Output heads
         self.output_head = ScalarOutputHead(
-            irreps_hidden, out_node_nf, hidden_dim=hidden_nf
+            current_irreps, out_node_nf, hidden_dim=hidden_nf
         )
 
         self.coord_head = VectorOutputHead(
-            irreps_hidden, hidden_dim=hidden_nf
+            current_irreps, hidden_dim=hidden_nf
         )
 
         self.to(self.device)
@@ -1016,11 +733,25 @@ class EGNN_Spherical(nn.Module):
         h_embedded = self.embedding(h)
         h_irrpes= self.scalar_to_irreps(h_embedded)
 
-        for conv in self.conv_layers:
-            h_irrpes = conv(
-                h_irrpes, edge_index, edge_sh, edge_features,
-                batch_mask
-            )        
+        for conv_layer in self.conv_layers:
+            if isinstance(conv_layer, MACEBlock):
+                # MACEBlock chỉ nhận radial embedding
+                h_irrpes = conv_layer(
+                    h=h_irrpes,
+                    edge_index=edge_index,
+                    edge_sh=edge_sh,
+                    edge_radial_embedding=edge_length_embedded, # Dùng biến gốc
+                    batch_mask=batch_mask
+                )
+            else: # SphericalHarmonicsBlock
+                # Khối này nhận toàn bộ edge_features (bao gồm cả edge_attr)
+                h_irrpes = conv_layer(
+                    h=h_irrpes,
+                    edge_index=edge_index,
+                    edge_sh=edge_sh,
+                    edge_features=edge_features, # Dùng biến đã kết hợp
+                    batch_mask=batch_mask
+                )       
         
         h_out = self.output_head(h_irrpes)
         coord_update = self.coord_head(h_irrpes)
