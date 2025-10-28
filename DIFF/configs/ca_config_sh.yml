@@ -1,4 +1,4 @@
-run_name: 'SE3-cond-CA-Spherical' 
+run_name: 'SE3-cond-CA-Spherical_MACE' 
 logdir: '/media/kenthai/Research02/ThangD21/DIFF/logs/train'
 wandb_params:
   mode: 'disabled'
@@ -11,7 +11,7 @@ num_sanity_val_steps: 0
 mode: 'pocket_conditioning'  
 pocket_representation: 'CA'
 batch_size: 16
-lr: 1.0e-3
+lr: 1.0e-4
 noise_factor: 1.0
 n_epochs: 1000
 num_workers: 1
@@ -23,7 +23,7 @@ accumulate_grad_batches: 2
 
 auxiliary_loss: False
 loss_params:
-  max_weight: 0.001
+  max_weight: 1.0
   schedule: 'linear'
   clamp_lj: 3.0
 
@@ -44,7 +44,7 @@ egnn_params:
   
   # Spherical harmonics specific parameters 
   lmax: 2                  
-  num_rbf: 16               
+  num_rbf: 8               
   max_radius: 5.0           
   normalization: 'layer'   
   rbf: 'expnormal'          
@@ -65,7 +65,7 @@ egnn_params:
 diffusion_params:
   diffusion_steps: 500
   diffusion_noise_schedule: 'polynomial_2'
-  diffusion_noise_precision: 5.0e-4
+  diffusion_noise_precision: 1.0e-5
   diffusion_loss_type: 'l2'
   normalize_factors: [1, 4]
 

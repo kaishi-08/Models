@@ -105,7 +105,6 @@ class GaussianSmearing(nn.Module):
         distances = distances.unsqueeze(-1)
         return torch.exp(-0.5 * ((distances - self.offset) / self.width) ** 2)
 
-
 class MACEBlock(nn.Module):
     """
     Complete MACE block that can be used as a drop-in replacement for 

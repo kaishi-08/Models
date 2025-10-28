@@ -17,7 +17,8 @@ class EGNNDynamics(nn.Module):
                  normalization_factor=100, out_node_nf=None, lmax=2, aggregation_method='sum',
                  update_pocket_coords=True, edge_cutoff_ligand=None,
                  edge_cutoff_pocket=None, edge_cutoff_interaction=None,
-                 reflection_equivariant=True, edge_embedding_dim=None, 
+                 reflection_equivariant=True, edge_embedding_dim=None,
+                 num_rbf=16, 
                  block_type='conv', max_correlation_order=3,
                  convolution_type='separable', weight_mode='True'):
         super().__init__()
@@ -29,6 +30,7 @@ class EGNNDynamics(nn.Module):
         self.edge_nf = edge_embedding_dim
         self.out_node_nf=out_node_nf
         self.lmax=lmax
+        self.num_rbf = num_rbf
         self.convolution_type = convolution_type
         self.weight_mode = weight_mode
         self.block_type = block_type
@@ -95,9 +97,9 @@ class EGNNDynamics(nn.Module):
                 hidden_nf=hidden_nf, device=device, act_fn=act_fn,
                 n_layers=n_layers, out_node_nf=dynamics_node_nf,
                 normalization='layer', lmax=lmax,
-                rbf='expnormal', trainable_rbf=True,
+                rbf='expnormal', trainable_rbf=True, num_rbf=self.num_rbf,
                 #MACE
-                num_rbf=16, block_type=self.block_type, max_correlation_order=self.max_correlation_order,
+                block_type=self.block_type, max_correlation_order=self.max_correlation_order,
                 #Conv_layer_type
                 convolution_type=convolution_type, weight_mode=weight_mode
             )

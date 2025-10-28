@@ -155,6 +155,7 @@ class LigandPocketDDPM(pl.LightningModule):
             update_pocket_coords=(self.mode == 'joint'),
             reflection_equivariant=egnn_params.reflection_equivariant,
             edge_embedding_dim=egnn_params.__dict__.get('edge_embedding_dim'),
+            num_rbf=egnn_params.__dict__.get('num_rbf', 16),
             block_type=egnn_params.__dict__.get('block_type', 'conv'),
             max_correlation_order=egnn_params.__dict__.get('max_correlation_order', 3),
             convolution_type=egnn_params.__dict__.get('convolution_type', 'separable'),
