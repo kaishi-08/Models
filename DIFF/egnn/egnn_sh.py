@@ -10,7 +10,7 @@ import math
 from mace.modules import (
     RealAgnosticInteractionBlock, 
     EquivariantProductBasisBlock)
-from mace.modules.blocks import RealAgnosticResidualInteractionBlock as ResidualBlock
+from mace.modules.blocks import RealAgnosticResidualInteractionBlock 
 
 class CosineCutoff(nn.Module):
     """
@@ -106,15 +106,7 @@ class GaussianSmearing(nn.Module):
         return torch.exp(-0.5 * ((distances - self.offset) / self.width) ** 2)
 
 class MACEBlock(nn.Module):
-    """
-    Complete MACE block that can be used as a drop-in replacement for 
-    standard equivariant layers.
-    
-    Features:
-    - Efficient many-body interactions via symmetric tensor products
-    - Reduced layer count (2 layers achieve same expressiveness as 5+ EGNN layers)
-    - Small receptive field (no need for deep stacking)
-    """
+
     def __init__(
         self,
         irreps_node_input: o3.Irreps,
@@ -128,15 +120,15 @@ class MACEBlock(nn.Module):
         self.norm = BatchNorm(irreps_node_hidden)
         self.max_correlation_order = max_correlation_order
         
-        self.interaction = RealAgnosticInteractionBlock(
+        self.interaction = RealAgnosticResidualInteractionBlock(
             node_feats_irreps=irreps_node_input,
             target_irreps=irreps_node_hidden,
-            hidden_irreps=o3.Irreps(f"{hidden_dim}x0e"),
+            hidden_irreps=irreps_node_hidden,
             avg_num_neighbors=1.0,
             edge_attrs_irreps=irreps_sh,
-            # Cần cung cấp irreps cho radial features để MLP được khởi tạo đúng
             edge_feats_irreps=o3.Irreps(f"{num_rbf}x0e"), 
-            node_attrs_irreps=o3.Irreps("1x0e")
+            node_attrs_irreps=o3.Irreps("1x0e"),
+            radial_MLP=[64, 64, 64]
         )
         
         # Bước 2: Khối Many-Body (Product Basis) để tạo message cuối cùng
@@ -144,46 +136,36 @@ class MACEBlock(nn.Module):
             node_feats_irreps=irreps_node_hidden, # Đầu vào là A-features
             target_irreps=irreps_node_hidden,      # Đầu ra là message
             correlation=max_correlation_order,
-            use_sc=False,
-            use_agnostic_product=True # Tự xử lý skip connection bên ngoài cho rõ ràng
-        )
-
-        # Bước 3: Lớp Linear đơn giản cho kết nối sót (Skip Connection)
-        self.skip_connection = Linear(
-            irreps_in=irreps_node_input, 
-            irreps_out=irreps_node_hidden
+            use_sc=True,
+            use_agnostic_product=True,
+            num_elements=1
         )
     
-    def forward(self, h, edge_index, edge_sh, edge_radial_embedding, **kwargs):
-        # Các khối mace-torch yêu cầu `node_attrs`. Vì mô hình của bạn
-        # không có, chúng ta tạo một tensor giả chứa các số 1.
-        node_attrs_dummy = torch.ones_like(h[:, 0:1])
-
+    def forward(self, h, edge_index, edge_sh, edge_radial_embedding, batch_mask=None, cutoff=None,**kwargs):
+        
+        node_attrs_dummy = torch.ones(
+            (h.shape[0], 1), 
+            dtype=h.dtype, 
+            device=h.device
+        )
         # Bước 1: Tạo A-features từ tương tác 2-body
-        # Hàm forward của InteractionBlock trả về một tuple (message, sc)
-        # SỬA Ở ĐÂY: Dùng `node_feats` thay vì `node_input`
         a_features, sc = self.interaction(
             node_feats=h,
             node_attrs=node_attrs_dummy,
             edge_attrs=edge_sh,
             edge_feats=edge_radial_embedding,
-            edge_index=edge_index
+            edge_index=edge_index,
+            cutoff=cutoff
         )
         
         # Bước 2: Tạo message cuối cùng từ tương tác many-body
-        # SỬA Ở ĐÂY: Dùng `node_feats` thay vì `node_input`
         messages = self.product_basis(
             node_feats=a_features,
             sc=sc, # Truyền skip connection từ bước tương tác
             node_attrs=node_attrs_dummy
         )
         
-        # Bước 3: Cập nhật với kết nối sót (trong trường hợp MACE đơn giản)
-        # hoặc có thể là một khối residual hoàn chỉnh
-        # SỬA Ở ĐÂY: Dùng `node_feats` thay vì `node_input`
-        skip = self.skip_connection(h)
-        h_out = messages + skip
-        h_out = self.norm(h_out)
+        h_out = self.norm(messages)
         return h_out
     
 class SeparableSphericalConvolution(nn.Module):
@@ -301,7 +283,6 @@ class SphericalHarmonicsConvolution(nn.Module):
                 internal_weights=False
             )
             
-            # MLP nhỏ gọn
             self.edge_mlp = nn.Sequential(
                 nn.Linear(edge_features, hidden_dim),
                 nn.SiLU(),
@@ -507,7 +488,6 @@ class VectorOutputHead(nn.Module):
         
         return output
 
-
 class ScalarOutputHead(nn.Module):
     """
     Output head for scalar predictions using L=0 and L=2
@@ -600,7 +580,8 @@ class EGNN_Spherical(nn.Module):
             f"{hidden_nf//2}x0e + {hidden_nf//4}x1o + {hidden_nf//8}x2e"
         )
         """
-
+        from mace.modules.radial import PolynomialCutoff
+        self.cutoff_fn = PolynomialCutoff(r_max=max_radius, p=6)
         
         num_channels = hidden_nf // 2
 
@@ -697,8 +678,9 @@ class EGNN_Spherical(nn.Module):
         )
 
         edge_length_embedded = self.radial_basis(edge_length.squeeze(-1))
+        cutoff = self.cutoff_fn(edge_length)
 
-        return edge_sh, edge_length_embedded
+        return edge_sh, edge_length_embedded, cutoff  
     
     def forward(self, h, x, edge_index, node_mask=None, edge_mask=None, 
                 update_coords_mask=None, batch_mask=None, edge_attr=None):
@@ -719,7 +701,7 @@ class EGNN_Spherical(nn.Module):
             h_out: [N, out_node_nf] - output node features
             x_out: [N, 3] - output coordinates
         """
-        edge_sh, edge_length_embedded = self.compute_edge_features(x, edge_index)
+        edge_sh, edge_length_embedded, cutoff = self.compute_edge_features(x, edge_index)
 
         if edge_attr is not None:
             edge_features = torch.cat([edge_length_embedded, edge_attr], dim=-1)
@@ -740,9 +722,10 @@ class EGNN_Spherical(nn.Module):
                     edge_index=edge_index,
                     edge_sh=edge_sh,
                     edge_radial_embedding=edge_length_embedded, # Dùng biến gốc
-                    batch_mask=batch_mask
+                    batch_mask=batch_mask,
+                    cutoff=cutoff
                 )
-            else: # SphericalHarmonicsBlock
+            else: 
                 # Khối này nhận toàn bộ edge_features (bao gồm cả edge_attr)
                 h_irrpes = conv_layer(
                     h=h_irrpes,
